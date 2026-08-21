@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Packaging
+*.egg-info/
+build/
+dist/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# PatchFox local runtime data
+.patchfox/
+.mini-patchfox/
+_local/
+artifacts/
+.kami-output/
+readme_intro_locked/
+tmp/
+.worktrees/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.patchfox.toml
+!.patchfox.toml.example
+
+# Release material pending cleanup
+release/
+
+# Local tools
+.gstack/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

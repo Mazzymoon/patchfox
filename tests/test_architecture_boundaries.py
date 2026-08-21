@@ -1,0 +1,60 @@
+"""Architecture budget tests for runtime module boundaries."""
+
+from pathlib import Path
+
+
+def test_core_modules_stay_below_entropy_budget():
+    root = Path(__file__).resolve().parents[1]
+    budgets = {
+        "patchfox/core/runtime.py": 950,
+        "patchfox/core/before_final_hooks.py": 140,
+        "patchfox/core/evidence_summaries.py": 90,
+        "patchfox/core/final_readiness.py": 120,
+        "patchfox/core/final_readiness_artifacts.py": 160,
+        "patchfox/core/final_readiness_context.py": 60,
+        "patchfox/core/final_readiness_reasons.py": 60,
+        "patchfox/core/final_readiness_tools.py": 100,
+        "patchfox/core/governance.py": 80,
+        "patchfox/core/runtime_events.py": 90,
+        "patchfox/core/runtime_consumers.py": 90,
+        "patchfox/core/artifacts.py": 130,
+        "patchfox/core/task_state.py": 140,
+        "patchfox/core/todo_ledger.py": 120,
+        "patchfox/core/worker_manager.py": 220,
+        "patchfox/core/context_manager.py": 420,
+        "patchfox/core/context_budget_summary.py": 130,
+        "patchfox/core/context_handoff.py": 240,
+        "patchfox/core/context_orchestrator.py": 210,
+        "patchfox/core/context_pressure.py": 140,
+        "patchfox/core/context_report.py": 140,
+        "patchfox/core/context_retention.py": 90,
+        "patchfox/core/context_replacements.py": 160,
+        "patchfox/core/context_sections.py": 170,
+        "patchfox/core/context_usage.py": 130,
+        "patchfox/core/compact.py": 250,
+        "patchfox/core/compact_summary.py": 130,
+        "patchfox/core/completion_governance.py": 240,
+        "patchfox/core/engine.py": 470,
+        "patchfox/core/model_errors.py": 100,
+        "patchfox/core/model_router.py": 40,
+        "patchfox/core/permissions.py": 140,
+        "patchfox/core/tool_policy.py": 90,
+        "patchfox/core/plan_mode.py": 140,
+        "patchfox/core/tool_executor.py": 181,
+        "patchfox/core/tool_profiles.py": 80,
+        "patchfox/core/tool_result_artifacts.py": 60,
+        "patchfox/core/turn_transitions.py": 90,
+        "patchfox/core/verification.py": 80,
+        "patchfox/core/turn_history.py": 280,
+        "patchfox/core/media_history.py": 20,
+        "patchfox/features/skills.py": 220,
+        "patchfox/features/skills_bundled.py": 120,
+        "patchfox/features/skills_runtime.py": 140,
+        "patchfox/tools/registry.py": 360,
+        "patchfox/tools/todos.py": 80,
+        "patchfox/tools/agents.py": 90,
+    }
+
+    for relative_path, max_lines in budgets.items():
+        line_count = len((root / relative_path).read_text(encoding="utf-8").splitlines())
+        assert line_count <= max_lines, f"{relative_path} has {line_count} lines, budget is {max_lines}"

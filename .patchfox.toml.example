@@ -1,0 +1,18 @@
+# Optional project defaults. Provider endpoints and API keys belong in
+# ~/.patchfox/config.toml and ~/.patchfox/auth.json (`patchfox config init`).
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[shell]
+backend = "auto"
+
+[sandbox]
+mode = "off"
+backend = "auto"
+workspace_write = true
+excluded_commands = []
+
+[sandbox.filesystem]
+extra_readonly_paths = []
+deny_read = []
+deny_write = []

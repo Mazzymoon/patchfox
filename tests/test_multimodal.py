@@ -136,7 +136,9 @@ def test_anthropic_client_sends_image_blocks_in_messages_payload(monkeypatch):
     assert client.last_completion_metadata["image_input_count"] == 1
 
 
-def test_deepseek_profile_defaults_to_openai_vision_provider(tmp_path, monkeypatch):
+def test_deepseek_profile_defaults_to_openai_vision_provider(
+    tmp_path, monkeypatch, isolated_patchfox_user_config
+):
     from patchfox.config import resolve_provider_config
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
@@ -169,7 +171,9 @@ def test_vision_provider_uses_vision_specific_env_overrides(tmp_path, monkeypatc
     assert config.base_url == "https://vision.example/v1"
 
 
-def test_build_agent_uses_separate_vision_provider_for_deepseek(tmp_path, monkeypatch):
+def test_build_agent_uses_separate_vision_provider_for_deepseek(
+    tmp_path, monkeypatch, isolated_patchfox_user_config
+):
     args = patchfox_cli.build_arg_parser().parse_args(
         ["--cwd", str(tmp_path), "--provider", "deepseek"]
     )
@@ -192,7 +196,9 @@ def test_build_agent_uses_separate_vision_provider_for_deepseek(tmp_path, monkey
     assert vision_client[1]["base_url"] == "https://vision.example/v1"
 
 
-def test_build_agent_uses_vision_specific_client_overrides(tmp_path, monkeypatch):
+def test_build_agent_uses_vision_specific_client_overrides(
+    tmp_path, monkeypatch, isolated_patchfox_user_config
+):
     args = patchfox_cli.build_arg_parser().parse_args(
         ["--cwd", str(tmp_path), "--provider", "deepseek", "--vision-timeout", "45"]
     )

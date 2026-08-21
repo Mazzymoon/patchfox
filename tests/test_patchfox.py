@@ -867,7 +867,9 @@ def test_build_agent_uses_anthropic_default_model_when_env_is_missing(tmp_path):
     assert mock_anthropic.call_args.kwargs["model"] == "claude-sonnet-4-6"
 
 
-def test_build_agent_does_not_load_provider_credentials_from_project_env(tmp_path):
+def test_build_agent_does_not_load_provider_credentials_from_project_env(
+    tmp_path, isolated_patchfox_user_config
+):
     (tmp_path / ".env").write_text(
         "\n".join(
             [
@@ -919,7 +921,9 @@ def test_build_agent_does_not_load_provider_credentials_from_project_env(tmp_pat
     assert agent.model_client is fake_client
 
 
-def test_project_toml_cannot_override_provider_endpoint_or_process_credential(tmp_path):
+def test_project_toml_cannot_override_provider_endpoint_or_process_credential(
+    tmp_path, isolated_patchfox_user_config
+):
     (tmp_path / ".patchfox.toml").write_text(
         "\n".join(
             [
@@ -953,7 +957,9 @@ def test_project_toml_cannot_override_provider_endpoint_or_process_credential(tm
     assert agent.model_client is fake_client
 
 
-def test_build_agent_uses_deepseek_default_model_when_env_is_missing(tmp_path):
+def test_build_agent_uses_deepseek_default_model_when_env_is_missing(
+    tmp_path, isolated_patchfox_user_config
+):
     args = patchfox_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--provider", "deepseek"])
 
     with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-deepseek"}, clear=True):
@@ -964,7 +970,9 @@ def test_build_agent_uses_deepseek_default_model_when_env_is_missing(tmp_path):
     assert mock_anthropic.call_args.kwargs["base_url"] == "https://api.deepseek.com/anthropic"
 
 
-def test_build_agent_uses_openai_provider_by_default(tmp_path):
+def test_build_agent_uses_openai_provider_by_default(
+    tmp_path, isolated_patchfox_user_config
+):
     args = patchfox_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
 
     with patch.dict(

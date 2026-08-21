@@ -255,6 +255,3 @@ pytest tests/ -q
 PATCHFOX_LIVE_SMOKE=1 pytest tests/test_release_smoke.py -q
 ```
 
-## License
-
-MIT

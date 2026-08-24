@@ -14,6 +14,11 @@ dependencies = [
   "tzdata>=2025.2; platform_system == 'Windows'",
 ]
 
+[project.optional-dependencies]
+swebench = [
+  "datasets>=2.19.0",
+]
+
 [project.scripts]
 patchfox = "patchfox.cli:main"
 patchfox-tui = "patchfox.tui.main:main"

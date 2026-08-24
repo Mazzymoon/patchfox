@@ -26,6 +26,7 @@ htmlcov/
 .mini-patchfox/
 _local/
 artifacts/
+.resume_latex_qa/
 .kami-output/
 readme_intro_locked/
 tmp/

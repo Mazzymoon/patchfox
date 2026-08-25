@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..features import memory as memorylib, skills as skillslib
-from .context_report import ContextReportBuilder, RELEVANT_MEMORY_LIMIT
+from ..features import memory as memorylib
+from ..features import skills as skillslib
+from .context_report import RELEVANT_MEMORY_LIMIT, ContextReportBuilder
 from .context_sections import (
     CURRENT_REQUEST_SECTION,
     MIN_SECTION_BUDGETS,
@@ -24,6 +25,7 @@ from .turn_history import TurnHistoryBuilder, tail_clip
 DEFAULT_TOTAL_BUDGET = 60000
 DEFAULT_SECTION_FLOORS = MIN_SECTION_BUDGETS
 DEFAULT_REDUCTION_ORDER = REDUCTION_ORDER
+RUNTIME_PROGRESS_SECTION = "runtime_progress"
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,12 @@ class ContextManager:
             "history": "",
             CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
         }
+        runtime_progress = {}
+        if hasattr(self.agent, "runtime_progress_context"):
+            runtime_progress = dict(self.agent.runtime_progress_context() or {})
+        section_texts[RUNTIME_PROGRESS_SECTION] = str(
+            runtime_progress.get("text", "")
+        )
         if hasattr(self.agent, "todo_ledger"):
             section_texts["memory"] += "\n\n" + self.agent.todo_ledger.render_prompt()
         checkpoint_text = ""
@@ -122,7 +130,14 @@ class ContextManager:
             section_texts["memory"] += "\n\n" + memorylib.build_memory_system_section(self.agent.memory_dir)
         selected_notes = []
         if memory_enabled and relevant_memory_enabled and hasattr(self.agent, "memory") and hasattr(self.agent.memory, "retrieval_candidates"):
-            selected_notes = self.agent.memory.retrieval_candidates(user_message, limit=RELEVANT_MEMORY_LIMIT)
+            excluded_sources = set()
+            if hasattr(self.agent, "relevant_memory_excluded_sources"):
+                excluded_sources = self.agent.relevant_memory_excluded_sources()
+            selected_notes = self.agent.memory.retrieval_candidates(
+                user_message,
+                limit=RELEVANT_MEMORY_LIMIT,
+                excluded_sources=excluded_sources,
+            )
 
         if not context_reduction_enabled:
             rendered = self._render_sections_without_reduction(section_texts, selected_notes=selected_notes)
@@ -213,6 +228,12 @@ class ContextManager:
                     "note_budget": 0,
                 },
             ),
+            RUNTIME_PROGRESS_SECTION: SectionRender(
+                raw=section_texts[RUNTIME_PROGRESS_SECTION],
+                budget=0,
+                rendered=section_texts[RUNTIME_PROGRESS_SECTION],
+                details={},
+            ),
             "history": SectionRender(raw=history_raw, budget=len(history_raw), rendered=history_raw, details={"rendered_entries": []}),
             CURRENT_REQUEST_SECTION: SectionRender(
                 raw=section_texts[CURRENT_REQUEST_SECTION],
@@ -240,6 +261,10 @@ class ContextManager:
             elif section == "relevant_memory":
                 rendered[section] = self._render_relevant_memory(selected_notes or [], int(budget or 0))
             elif section == "history":
+                progress_raw = section_texts[RUNTIME_PROGRESS_SECTION]
+                rendered[RUNTIME_PROGRESS_SECTION] = SectionRender(
+                    raw=progress_raw, budget=0, rendered=progress_raw, details={}
+                )
                 rendered[section] = self._render_history_section(int(budget or 0), pressure=pressure)
             else:
                 raw = section_texts[section]
@@ -352,7 +377,12 @@ class ContextManager:
 
     def _assemble_prompt(self, rendered):
         # 顺序是刻意设计的：稳定规则放前面，最新请求放最后。
-        return "\n\n".join(rendered[section].rendered for section in SECTION_ORDER).strip()
+        order = (*SECTION_ORDER[:-2], RUNTIME_PROGRESS_SECTION, *SECTION_ORDER[-2:])
+        return "\n\n".join(
+            rendered[section].rendered
+            for section in order
+            if rendered[section].rendered.strip()
+        ).strip()
 
     def _metadata(self, prompt, rendered, budgets, reduction_log, selected_notes, user_message, section_texts, pressure=None):
         metadata = ContextReportBuilder(

@@ -25,6 +25,9 @@ def execute_tool_payload(engine, task_state, user_message, payload):
 
     tool_result = agent.run_tool(name, args)
     tool_metadata = dict(agent._last_tool_result_metadata or {})
+    agent.record_runtime_progress_after_tool(
+        task_state, name, args, tool_metadata
+    )
     tool_duration_ms = int((time.monotonic() - tool_started_at) * 1000)
     agent.session_event_bus.emit(
         "tool_finished",

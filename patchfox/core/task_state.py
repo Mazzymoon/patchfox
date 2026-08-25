@@ -9,6 +9,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import uuid4
 
+from .runtime_progress import (
+    default_runtime_progress_state,
+    runtime_progress_state_from_dict,
+)
+
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_STOPPED = "stopped"
@@ -44,6 +49,7 @@ class TaskState:
     runtime_reminders: list = field(default_factory=list)
     todo_changes: list = field(default_factory=list)
     evidence_summaries: dict = field(default_factory=dict)
+    runtime_progress: dict = field(default_factory=default_runtime_progress_state)
 
     @classmethod
     def create(cls, task_id, user_request, run_id=""):
@@ -71,6 +77,7 @@ class TaskState:
             runtime_reminders=list(data.get("runtime_reminders", [])),
             todo_changes=list(data.get("todo_changes", [])),
             evidence_summaries=dict(data.get("evidence_summaries", {}) or {}),
+            runtime_progress=runtime_progress_state_from_dict(data),
         )
 
     def record_attempt(self):
@@ -126,4 +133,5 @@ class TaskState:
             "runtime_reminders": list(self.runtime_reminders),
             "todo_changes": list(self.todo_changes),
             "evidence_summaries": dict(self.evidence_summaries),
+            **self.runtime_progress,
         }

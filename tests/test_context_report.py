@@ -24,6 +24,9 @@ def test_context_report_builder_matches_existing_metadata_contract():
             rendered="Relevant memory:\n- note one",
             details={"rendered_notes": ["note one"], "rendered_count": 1},
         ),
+        "runtime_progress": SectionRender(
+            raw="", budget=0, rendered="", details={}
+        ),
         "history": SectionRender(
             raw="history raw",
             budget=60,
@@ -100,6 +103,17 @@ def test_context_report_builder_matches_existing_metadata_contract():
             "rendered_chars": 27,
             "rendered_notes": ["note one"],
             "rendered_count": 1,
+            "retrieved_note_count": 0,
+            "unique_source_count": 0,
+            "duplicate_source_filtered_count": 0,
+            "recent_source_filtered_count": 0,
+        },
+        "runtime_progress": {
+            "active": False,
+            "kind": "",
+            "remaining_steps": 0,
+            "phase_hint": "",
+            "rendered_chars": 0,
         },
         "history": {
             "raw_chars": 11,
@@ -156,6 +170,7 @@ def test_context_report_builder_matches_existing_metadata_contract():
         "budget_reductions",
         "reduction_order",
         "relevant_memory",
+        "runtime_progress",
         "history",
         "skills",
         "current_request",

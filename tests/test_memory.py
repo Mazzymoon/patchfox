@@ -1,10 +1,9 @@
-import json
 import hashlib
+import json
 import subprocess
 from datetime import date
 
 from patchfox import PatchFox, SessionStore, WorkspaceContext
-from patchfox.features.memory_lint import SECRET_PATTERNS
 from patchfox.features.memory import (
     LayeredMemory,
     append_to_daily_log,
@@ -21,6 +20,7 @@ from patchfox.features.memory import (
     try_acquire_lock,
     workspace_fingerprint,
 )
+from patchfox.features.memory_lint import SECRET_PATTERNS
 from patchfox.testing import ScriptedModelClient
 
 
@@ -98,7 +98,7 @@ def test_retrieval_view_structured_reports_selected_and_rejected_reasons():
 
     structured = retrieval_view_structured(memory.state, "alpha", limit=1)
 
-    assert set(structured) == {"selected", "rejected", "query_hash"}
+    assert set(structured) == {"selected", "rejected", "query_hash", "metrics"}
     assert len(structured["query_hash"]) == 12
     assert [note["text"] for note in structured["selected"]] == ["alpha selected note"]
     reject_reasons = {note["reject_reason"] for note in structured["rejected"]}
@@ -106,6 +106,90 @@ def test_retrieval_view_structured_reports_selected_and_rejected_reasons():
     for note in structured["rejected"]:
         assert set(note) >= {"note_id", "layer", "score", "reject_reason"}
     assert "alpha below limit note" not in memory.retrieval_view("alpha", limit=1)
+
+
+def test_retrieval_deduplicates_sources_after_scoring_and_preserves_other_sources():
+    memory = LayeredMemory()
+    memory.append_note(
+        "alpha older best-source note",
+        tags=("alpha",),
+        source="src/best.py",
+        created_at="2026-04-07T10:00:00+00:00",
+    )
+    memory.append_note(
+        "alpha newer best-source note",
+        tags=("alpha",),
+        source="src/best.py",
+        created_at="2026-04-07T10:01:00+00:00",
+    )
+    memory.append_note(
+        "alpha second source note",
+        tags=("alpha",),
+        source="src/second.py",
+        created_at="2026-04-07T09:59:00+00:00",
+    )
+
+    structured = memory.retrieval_view_structured("alpha", limit=3)
+
+    assert [note["text"] for note in structured["selected"]] == [
+        "alpha newer best-source note",
+        "alpha second source note",
+    ]
+    assert structured["metrics"] == {
+        "retrieved_note_count": 2,
+        "unique_source_count": 2,
+        "duplicate_source_filtered_count": 1,
+        "recent_source_filtered_count": 0,
+    }
+    assert any(
+        note.get("reject_reason") == "duplicate_source"
+        for note in structured["rejected"]
+    )
+
+
+def test_retrieval_recent_source_cooldown_filters_without_deleting_memory():
+    memory = LayeredMemory()
+    memory.append_note(
+        "alpha recently read source",
+        tags=("alpha",),
+        source="src/recent.py",
+    )
+    memory.append_note(
+        "alpha available source",
+        tags=("alpha",),
+        source="src/available.py",
+    )
+
+    during = memory.retrieval_view_structured(
+        "alpha", limit=3, excluded_sources={"src/recent.py"}
+    )
+    after = memory.retrieval_view_structured("alpha", limit=3)
+
+    assert [note["source"] for note in during["selected"]] == [
+        "src/available.py"
+    ]
+    assert during["metrics"]["recent_source_filtered_count"] == 1
+    assert {note["source"] for note in after["selected"]} == {
+        "src/recent.py",
+        "src/available.py",
+    }
+    assert len(memory.to_dict()["episodic_notes"]) == 2
+
+
+def test_retrieval_does_not_merge_source_less_durable_notes():
+    memory = LayeredMemory()
+    memory.append_note(
+        "alpha durable note one", tags=("alpha",), kind="durable"
+    )
+    memory.append_note(
+        "alpha durable note two", tags=("alpha",), kind="durable"
+    )
+
+    structured = memory.retrieval_view_structured("alpha", limit=3)
+
+    assert len(structured["selected"]) == 2
+    assert structured["metrics"]["unique_source_count"] == 2
+    assert structured["metrics"]["duplicate_source_filtered_count"] == 0
 
 
 def test_structured_retrieval_rejects_stale_evidence_and_scope_mismatch():

@@ -43,6 +43,7 @@ class ContextReportBuilder:
             "budget_reductions": list(reduction_log),
             "reduction_order": list(self.reduction_order),
             "relevant_memory": self._relevant_memory_metadata(rendered, selected_notes),
+            "runtime_progress": self._runtime_progress_metadata(rendered),
             "history": self._history_metadata(rendered),
             "skills": self._skills_metadata(),
             "current_request": {
@@ -57,6 +58,11 @@ class ContextReportBuilder:
     def _relevant_memory_metadata(self, rendered, selected_notes):
         relevant = rendered["relevant_memory"]
         details = relevant.details or {}
+        retrieval = dict(
+            getattr(getattr(self.agent, "memory", None), "last_retrieval", {})
+            or {}
+        )
+        metrics = dict(retrieval.get("metrics", {}) or {})
         return {
             "limit": RELEVANT_MEMORY_LIMIT,
             "selected_count": len(selected_notes),
@@ -70,6 +76,27 @@ class ContextReportBuilder:
             "rendered_chars": relevant.rendered_chars,
             "rendered_notes": list(details.get("rendered_notes", [])),
             "rendered_count": int(details.get("rendered_count", 0)),
+            "retrieved_note_count": int(metrics.get("retrieved_note_count", 0)),
+            "unique_source_count": int(metrics.get("unique_source_count", 0)),
+            "duplicate_source_filtered_count": int(
+                metrics.get("duplicate_source_filtered_count", 0)
+            ),
+            "recent_source_filtered_count": int(
+                metrics.get("recent_source_filtered_count", 0)
+            ),
+        }
+
+    def _runtime_progress_metadata(self, rendered):
+        progress = rendered["runtime_progress"]
+        context = {}
+        if hasattr(self.agent, "runtime_progress_context"):
+            context = dict(self.agent.runtime_progress_context() or {})
+        return {
+            "active": bool(context.get("active", False)),
+            "kind": str(context.get("kind", "")),
+            "remaining_steps": int(context.get("remaining_steps", 0) or 0),
+            "phase_hint": str(context.get("phase_hint", "")),
+            "rendered_chars": progress.rendered_chars,
         }
 
     def _history_metadata(self, rendered):

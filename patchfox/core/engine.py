@@ -15,12 +15,12 @@ from .completion_governance import (
     finish_successful_run,
 )
 from .context_replacements import commit_proposed_replacements
-from .model_errors import finish_model_error
 from .engine_helpers import (
     execute_tool_payload,
     request_step_limit_summary,
     should_retry_model_error,
 )
+from .model_errors import finish_model_error
 from .task_state import STOP_REASON_FINAL_GATE_BLOCKED, TaskState
 from .turn_transitions import (
     CONTINUE_FINAL_READINESS_NOTICE,
@@ -85,6 +85,7 @@ class Engine:
         agent.current_turn_id = task_state.task_id
         agent.current_run_id = task_state.run_id
         agent.current_run_dir = agent.run_store.start_run(task_state)
+        agent.start_runtime_progress(task_state)
         agent.session_event_bus.emit(
             "turn_started",
             {
@@ -149,6 +150,7 @@ class Engine:
             )
             structured_memory = getattr(getattr(agent, "memory", None), "last_retrieval", None)
             if structured_memory is not None:
+                retrieval_metrics = dict(structured_memory.get("metrics", {}) or {})
                 agent.emit_trace(
                     task_state,
                     "memory.retrieval",
@@ -157,6 +159,7 @@ class Engine:
                         "selected": list(structured_memory.get("selected", [])),
                         "rejected": list(structured_memory.get("rejected", [])),
                         "workspace_fingerprint": memorylib.workspace_fingerprint(agent.root),
+                        **retrieval_metrics,
                     },
                 )
             for file_read in memorylib.memory_file_read_payloads(agent.memory_dir, agent.root, reason="retrieval"):

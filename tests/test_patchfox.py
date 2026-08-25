@@ -1103,6 +1103,13 @@ def test_prompt_budget_metadata_records_budget_decisions(tmp_path):
     relevant_section = agent.model_client.prompts[0].split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
 
     assert metadata["relevant_memory"]["selected_count"] == 3
+    retrieval_events = [
+        event for event in trace_events if event["event"] == "memory.retrieval"
+    ]
+    assert retrieval_events[0]["retrieved_note_count"] == 3
+    assert retrieval_events[0]["unique_source_count"] == 3
+    assert retrieval_events[0]["duplicate_source_filtered_count"] == 0
+    assert retrieval_events[0]["recent_source_filtered_count"] == 0
     assert len(metadata["relevant_memory"]["rendered_notes"]) == 3
     assert len([line for line in relevant_section.splitlines() if line.startswith("- ")]) == 3
     assert "alpha episodic" in relevant_section

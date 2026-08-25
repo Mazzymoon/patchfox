@@ -1,7 +1,7 @@
-from patchfox.testing import ScriptedModelClient
 from patchfox import PatchFox, SessionStore, WorkspaceContext
-from patchfox.core.context_report import ContextReportBuilder
 from patchfox.core.context_manager import ContextManager
+from patchfox.core.context_report import ContextReportBuilder
+from patchfox.testing import ScriptedModelClient
 
 
 def build_workspace(tmp_path):
@@ -65,6 +65,7 @@ def test_context_manager_build_delegates_metadata_to_report_builder(tmp_path, mo
         "budget_reductions",
         "reduction_order",
         "relevant_memory",
+        "runtime_progress",
         "history",
         "skills",
         "current_request",

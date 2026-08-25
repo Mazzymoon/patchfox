@@ -5,40 +5,42 @@ The turn control loop lives in core.engine; tool execution and model-output
 parsing live in focused helper modules.
 """
 
+import hashlib
 import json
 import os
 import textwrap
 import uuid
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from ..features import memory as memorylib, skills as skillslib
+from ..features import memory as memorylib
+from ..features import skills as skillslib
 from ..features.sandbox import SandboxConfig, SandboxRunner
 from ..shell import resolve_shell_backend
+from ..tools import registry as toolkit
+from . import model_output, tool_executor
 from .compact import CompactManager
 from .context_manager import ContextManager
 from .context_orchestrator import ContextOrchestrator
 from .engine import Engine
-from . import model_output, tool_executor
 from .model_router import ModelClientRouter
-from .plan_mode import PlanModeController
 from .permissions import PermissionChecker
+from .plan_mode import PlanModeController
 from .run_store import RunStore
-from .runtime_consumers import default_runtime_consumers
 from .runtime_checkpoints import RuntimeCheckpointsMixin
+from .runtime_consumers import default_runtime_consumers
 from .runtime_events import build_runtime_event
+from .runtime_progress import RuntimeProgress
 from .runtime_secrets import REDACTED_VALUE, RuntimeSecretsMixin
 from .session_events import SessionEventBus
 from .session_lifecycle import clear_runtime_session, resume_runtime_session
 from .session_store import SessionStore as SessionStore  # noqa: F401
-from .tool_repetition import is_repeated_tool_call
-from .tool_profiles import build_tool_profiles
 from .todo_ledger import TodoLedger
+from .tool_profiles import build_tool_profiles
+from .tool_repetition import is_repeated_tool_call
 from .turn_history import TurnHistoryBuilder
 from .worker_manager import WorkerManager
-from ..tools import registry as toolkit
 from .workspace import MAX_HISTORY, WorkspaceContext, clip, now
 
 DEFAULT_SHELL_ENV_ALLOWLIST = (
@@ -105,6 +107,7 @@ class PatchFox(RuntimeSecretsMixin, RuntimeCheckpointsMixin):
         allowed_tools=None,
         final_readiness_mode="warn",
         before_final_hooks=None,
+        runtime_progress_config=None,
     ):
         self.model_client = model_client
         self.model_client_factory = model_client_factory
@@ -213,6 +216,7 @@ class PatchFox(RuntimeSecretsMixin, RuntimeCheckpointsMixin):
             context_window=int(getattr(self.model_client, "context_window", 0) or 0),
         )
         self.context_orchestrator = ContextOrchestrator(self)
+        self.runtime_progress = RuntimeProgress(runtime_progress_config)
         self.resume_state = self.evaluate_resume_state()
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
@@ -643,6 +647,28 @@ class PatchFox(RuntimeSecretsMixin, RuntimeCheckpointsMixin):
         snapshot = self.context_orchestrator.snapshot(user_message, prefix_refresh=refresh)
         result = self.context_orchestrator.build(snapshot)
         return result.prompt, result.metadata
+
+    def start_runtime_progress(self, task_state):
+        self.runtime_progress.start_turn(task_state)
+
+    def record_runtime_progress_after_tool(self, task_state, name, args, metadata):
+        progress_args = dict(args or {})
+        if name == "read_file" and progress_args.get("path"):
+            progress_args["path"] = self.memory.canonical_path(progress_args["path"])
+        self.runtime_progress.record_tool(
+            task_state, name, progress_args, metadata
+        )
+
+    def runtime_progress_context(self):
+        return self.runtime_progress.prompt_hint(
+            self.current_task_state, self.max_steps
+        )
+
+    def relevant_memory_excluded_sources(self):
+        task_state = self.current_task_state
+        if task_state is None:
+            return set()
+        return self.runtime_progress.recent_sources(task_state.tool_steps)
 
     def compact_history(self, trigger="manual", keep_recent_turns=2, summary_mode="deterministic"):
         return self.compact_manager.compact(

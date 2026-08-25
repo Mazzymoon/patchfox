@@ -8,11 +8,11 @@ session history 负责保存完整事件流；这个模块只保存更小的一�
 import hashlib
 import json
 import os
+import re
 import subprocess
 import threading
 from collections import Counter
 from datetime import date, datetime, timezone
-import re
 from pathlib import Path
 
 from ..core.workspace import WorkspaceContext, clip, now
@@ -1169,6 +1169,13 @@ def _retrieval_record(note, score, reject_reason=""):
     return enriched
 
 
+def _retrieval_source_key(note, workspace_root=None):
+    source = str(note.get("source", "")).strip()
+    if not source:
+        return ""
+    return canonicalize_path(source, workspace_root)
+
+
 def _source_path_for_evidence(workspace_root, source_path):
     source_path = str(source_path or "").strip()
     if not source_path:
@@ -1454,28 +1461,86 @@ def _ranked_retrieval_notes(state, query, workspace_root=None):
     return ranked
 
 
-def retrieval_view_structured(state, query, limit=3, workspace_root=None):
+def retrieval_view_structured(
+    state, query, limit=3, workspace_root=None, excluded_sources=None
+):
     selected = []
     rejected = []
+    seen_sources = set()
+    excluded_source_keys = {
+        canonicalize_path(source, workspace_root)
+        for source in (excluded_sources or ())
+        if str(source).strip()
+    }
+    duplicate_source_filtered_count = 0
+    recent_source_filtered_count = 0
     for _, score, note in _ranked_retrieval_notes(state, query, workspace_root):
         reject_reason = _retrieval_reject_reason(note, workspace_root)
         if reject_reason:
             rejected.append(_retrieval_record(note, score, reject_reason=reject_reason))
             continue
+        source_key = _retrieval_source_key(note, workspace_root)
+        if source_key and source_key in excluded_source_keys:
+            recent_source_filtered_count += 1
+            rejected.append(
+                _retrieval_record(
+                    note, score, reject_reason="recent_source_cooldown"
+                )
+            )
+            continue
+        if source_key and source_key in seen_sources:
+            duplicate_source_filtered_count += 1
+            rejected.append(
+                _retrieval_record(note, score, reject_reason="duplicate_source")
+            )
+            continue
+        if source_key:
+            seen_sources.add(source_key)
         if len(selected) < int(limit):
             selected.append(_retrieval_record(note, score))
         else:
             rejected.append(_retrieval_record(note, score, reject_reason="below_limit"))
-    return {"selected": selected, "rejected": rejected, "query_hash": _query_hash(query)}
+    selected_source_keys = {
+        _retrieval_source_key(note, workspace_root)
+        or f"note:{_retrieval_note_id(note)}"
+        for note in selected
+    }
+    return {
+        "selected": selected,
+        "rejected": rejected,
+        "query_hash": _query_hash(query),
+        "metrics": {
+            "retrieved_note_count": len(selected),
+            "unique_source_count": len(selected_source_keys),
+            "duplicate_source_filtered_count": duplicate_source_filtered_count,
+            "recent_source_filtered_count": recent_source_filtered_count,
+        },
+    }
 
 
-def retrieval_candidates(state, query, limit=3, workspace_root=None):
-    structured = retrieval_view_structured(state, query, limit=limit, workspace_root=workspace_root)
+def retrieval_candidates(
+    state, query, limit=3, workspace_root=None, excluded_sources=None
+):
+    structured = retrieval_view_structured(
+        state,
+        query,
+        limit=limit,
+        workspace_root=workspace_root,
+        excluded_sources=excluded_sources,
+    )
     return structured["selected"]
 
 
-def retrieval_view(state, query, limit=3, workspace_root=None):
-    structured = retrieval_view_structured(state, query, limit=limit, workspace_root=workspace_root)
+def retrieval_view(
+    state, query, limit=3, workspace_root=None, excluded_sources=None
+):
+    structured = retrieval_view_structured(
+        state,
+        query,
+        limit=limit,
+        workspace_root=workspace_root,
+        excluded_sources=excluded_sources,
+    )
     candidates = structured["selected"]
     lines = ["Relevant memory:"]
     if not candidates:
@@ -1570,16 +1635,40 @@ class LayeredMemory:
         self.state, invalidated = invalidate_stale_file_summaries(self.state, self.workspace_root)
         return invalidated
 
-    def retrieval_candidates(self, query, limit=3):
-        self.last_retrieval = retrieval_view_structured(self.state, query, limit=limit, workspace_root=self.workspace_root)
+    def retrieval_candidates(self, query, limit=3, excluded_sources=None):
+        self.last_retrieval = retrieval_view_structured(
+            self.state,
+            query,
+            limit=limit,
+            workspace_root=self.workspace_root,
+            excluded_sources=excluded_sources,
+        )
         return self.last_retrieval["selected"]
 
-    def retrieval_view_structured(self, query, limit=3):
-        self.last_retrieval = retrieval_view_structured(self.state, query, limit=limit, workspace_root=self.workspace_root)
+    def retrieval_view_structured(self, query, limit=3, excluded_sources=None):
+        self.last_retrieval = retrieval_view_structured(
+            self.state,
+            query,
+            limit=limit,
+            workspace_root=self.workspace_root,
+            excluded_sources=excluded_sources,
+        )
         return self.last_retrieval
 
-    def retrieval_view(self, query, limit=3):
-        return retrieval_view(self.state, query, limit=limit, workspace_root=self.workspace_root)
+    def retrieval_view(self, query, limit=3, excluded_sources=None):
+        self.last_retrieval = retrieval_view_structured(
+            self.state,
+            query,
+            limit=limit,
+            workspace_root=self.workspace_root,
+            excluded_sources=excluded_sources,
+        )
+        candidates = self.last_retrieval["selected"]
+        lines = ["Relevant memory:"]
+        lines.extend(f"- {note['text']}" for note in candidates)
+        if not candidates:
+            lines.append("- none")
+        return "\n".join(lines)
 
     def render_memory_text(self):
         return render_memory_text(self.state, self.workspace_root)

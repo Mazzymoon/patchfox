@@ -321,6 +321,7 @@ def run_swebench_instance(
                 "container_id": "",
                 "container_workspace": CONTAINER_WORKSPACE,
                 "initial_image_head": "",
+                "base_commit_is_ancestor_of_initial_head": None,
                 "effective_path": TESTBED_PATH,
                 "python_executable": "",
                 "python_version": "",
@@ -517,12 +518,23 @@ def _run_in_swebench_image(
             workdir=CONTAINER_WORKSPACE,
         ).stdout.strip()
         metadata["initial_image_head"] = initial_head
-        if not _same_commit(initial_head, instance.base_commit):
-            raise RuntimeError(
-                "official image HEAD does not match dataset base_commit: "
-                f"{initial_head} != {instance.base_commit}"
-            )
         _require_clean_container_workspace(docker, container_id, "initial image")
+        ancestor_check = _docker_exec(
+            docker,
+            container_id,
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                instance.base_commit,
+                initial_head,
+            ],
+            workdir=CONTAINER_WORKSPACE,
+            check=False,
+        )
+        metadata["base_commit_is_ancestor_of_initial_head"] = (
+            ancestor_check.returncode == 0
+        )
 
         runtime_info = _container_python_info(
             docker, container_id, CONTAINER_RUNTIME_PYTHON
@@ -866,12 +878,6 @@ def _container_name(run_id: str, instance_id: str) -> str:
     safe = "".join(char if char.isalnum() or char in "_.-" else "-" for char in raw)
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
     return f"{safe[:100]}-{digest}"
-
-
-def _same_commit(left: str, right: str) -> bool:
-    left = str(left).strip().lower()
-    right = str(right).strip().lower()
-    return bool(left and right and (left.startswith(right) or right.startswith(left)))
 
 
 def _patchfox_git_commit() -> str:

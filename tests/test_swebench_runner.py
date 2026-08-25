@@ -271,6 +271,68 @@ def test_swebench_image_metadata_records_real_outer_boundary(
     assert metadata["evidence"]["manifest"]["patchfox_evidence_available"] is True
 
 
+def test_swebench_image_allows_setup_commit_and_diffs_from_initial_head(
+    tmp_path, monkeypatch
+):
+    setup_head = "5efaed257c694e4452b4c8361aae1cd9cdefd6d1"
+    base_commit = "cffd4e0f86fefd4802349a9f9b19ed70934ea354"
+    docker = FakeDocker(initial_image_head=setup_head)
+    _mock_provider(monkeypatch)
+
+    result = run_swebench_instance(
+        replace(_config(tmp_path), execution_mode="swebench-image"),
+        dataset_loader=lambda dataset, split: [_dataset_row(base_commit)],
+        docker_client=docker,
+    )
+
+    assert result.returncode == 0
+    assert result.metadata["instance"]["base_commit"] == base_commit
+    assert result.metadata["initial_image_head"] == setup_head
+    assert result.metadata["base_commit_is_ancestor_of_initial_head"] is True
+    diff_command = docker.command_containing("--no-ext-diff")
+    assert setup_head in diff_command
+    assert base_commit not in diff_command
+    assert "SETUP_COMMIT_CHANGE" not in result.prediction["model_patch"]
+    clean_checks = [
+        call
+        for call in docker.calls
+        if call["args"][-3:] == ["git", "status", "--porcelain"]
+    ]
+    assert len(clean_checks) == 2
+
+
+def test_swebench_image_rejects_dirty_initial_worktree(tmp_path, monkeypatch):
+    docker = FakeDocker(initial_worktree_dirty=True)
+    _mock_provider(monkeypatch)
+
+    result = run_swebench_instance(
+        replace(_config(tmp_path), execution_mode="swebench-image"),
+        dataset_loader=lambda dataset, split: [_dataset_row()],
+        docker_client=docker,
+    )
+
+    assert result.returncode == 1
+    assert result.prediction["model_patch"] == ""
+    assert "initial image left /testbed dirty" in result.metadata["error"]["message"]
+    assert docker.removed is True
+
+
+def test_swebench_image_ancestor_diagnostic_does_not_fail_closed(
+    tmp_path, monkeypatch
+):
+    docker = FakeDocker(ancestor_returncode=1)
+    _mock_provider(monkeypatch)
+
+    result = run_swebench_instance(
+        replace(_config(tmp_path), execution_mode="swebench-image"),
+        dataset_loader=lambda dataset, split: [_dataset_row()],
+        docker_client=docker,
+    )
+
+    assert result.returncode == 0
+    assert result.metadata["base_commit_is_ancestor_of_initial_head"] is False
+
+
 def test_swebench_image_agent_failure_cleans_container_and_writes_empty_patch(
     tmp_path, monkeypatch
 ):
@@ -511,10 +573,17 @@ class FakeDocker:
         agent_returncode=0,
         fail_runtime_install=False,
         fail_create=False,
+        initial_image_head="abc123",
+        initial_worktree_dirty=False,
+        ancestor_returncode=0,
     ):
         self.agent_returncode = agent_returncode
         self.fail_runtime_install = fail_runtime_install
         self.fail_create = fail_create
+        self.initial_image_head = initial_image_head
+        self.initial_worktree_dirty = initial_worktree_dirty
+        self.ancestor_returncode = ancestor_returncode
+        self.status_calls = 0
         self.calls = []
         self.prompt = ""
         self.removed = False
@@ -548,9 +617,16 @@ class FakeDocker:
         elif args and args[0] == "exec":
             command = self._exec_command(args)
             if command[-3:] == ["git", "rev-parse", "HEAD"]:
-                stdout = "abc123\n"
+                stdout = f"{self.initial_image_head}\n"
             elif command[-3:] == ["git", "status", "--porcelain"]:
-                stdout = ""
+                self.status_calls += 1
+                stdout = (
+                    " M setup.py\n"
+                    if self.initial_worktree_dirty and self.status_calls == 1
+                    else ""
+                )
+            elif "merge-base" in command:
+                returncode = self.ancestor_returncode
             elif "import json,platform,sys" in " ".join(command):
                 if command[0] == "/opt/miniconda3/bin/python":
                     stdout = json.dumps(

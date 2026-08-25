@@ -11,6 +11,7 @@ from patchfox.evaluation.swebench_runner import (
     collect_model_patch,
     invoke_patchfox_cli,
     load_swebench_instance,
+    load_swebench_record,
     prepare_git_workspace,
     run_swebench_instance,
 )
@@ -36,6 +37,18 @@ def test_instance_metadata_reader_keeps_only_public_issue_fields():
     assert not hasattr(instance, "test_patch")
     assert not hasattr(instance, "FAIL_TO_PASS")
     assert not hasattr(instance, "PASS_TO_PASS")
+    assert not hasattr(instance, "image")
+    assert not hasattr(instance, "eval_script")
+    assert not hasattr(instance, "hints_text")
+
+    record = load_swebench_record(
+        "SWE-bench/SWE-bench_Verified",
+        "test",
+        INSTANCE_ID,
+        dataset_loader=lambda dataset, split: [row],
+    )
+    assert record.image == "swebench/PRIVATE_IMAGE_SECRET:latest"
+    assert not hasattr(record.instance, "image")
 
 
 def test_prepare_workspace_checks_out_exact_clean_base_commit(tmp_path):
@@ -142,9 +155,179 @@ def test_runner_cli_exposes_runtime_controls_with_safe_defaults():
     assert args.approval == "auto"
     assert args.sandbox == "required"
     assert args.sandbox_backend == "auto"
+    assert args.execution_mode == "host"
     help_text = parser.format_help()
     assert "risky tools without human confirmation" in help_text
     assert "fails closed" in help_text
+
+
+def test_swebench_image_mode_uses_ephemeral_container_and_off_inner_sandbox(
+    tmp_path, monkeypatch
+):
+    docker = FakeDocker()
+    _mock_provider(monkeypatch)
+
+    result = run_swebench_instance(
+        replace(_config(tmp_path), execution_mode="swebench-image"),
+        dataset_loader=lambda dataset, split: [_dataset_row()],
+        docker_client=docker,
+    )
+
+    assert result.returncode == 0
+    assert "diff --git a/brand_new.py b/brand_new.py" in result.prediction[
+        "model_patch"
+    ]
+    assert ".patchfox" not in result.prediction["model_patch"]
+    assert docker.removed is True
+    assert docker.prompt == "Fix the public issue."
+    assert "PRIVATE_IMAGE_SECRET" not in docker.prompt
+    assert "GOLD_PATCH_SECRET" not in docker.prompt
+    assert "TEST_PATCH_SECRET" not in docker.prompt
+    assert "EVAL_SCRIPT_SECRET" not in docker.prompt
+    assert "HINT_SECRET" not in docker.prompt
+
+    create = docker.command_starting_with("create")
+    forbidden = {"--privileged", "--cap-add", "--mount", "--volume", "-v"}
+    assert forbidden.isdisjoint(create)
+    assert all("docker.sock" not in item for item in create)
+
+    agent_command = docker.patchfox_command()
+    assert _option_value(agent_command, "--approval") == "auto"
+    assert _option_value(agent_command, "--sandbox") == "off"
+    assert _option_value(agent_command, "--sandbox-backend") == "none"
+    assert "required" not in agent_command
+    assert "bubblewrap" not in agent_command
+    assert "TOP_SECRET_API_KEY" not in " ".join(agent_command)
+
+
+def test_swebench_image_mode_separates_runtime_and_testbed_python(
+    tmp_path, monkeypatch
+):
+    docker = FakeDocker()
+    _mock_provider(monkeypatch)
+
+    result = run_swebench_instance(
+        replace(_config(tmp_path), execution_mode="swebench-image"),
+        dataset_loader=lambda dataset, split: [_dataset_row()],
+        docker_client=docker,
+    )
+
+    runtime_install = docker.command_containing("--target")
+    assert "/opt/miniconda3/bin/python" in runtime_install
+    assert "/opt/patchfox-runtime" in runtime_install
+    editable_install = docker.command_ending_with(
+        ["python", "-m", "pip", "install", "-e", "."]
+    )
+    assert editable_install
+    agent_call = docker.call_containing("patchfox")
+    assert "PATH=/opt/miniconda3/envs/testbed/bin:" in " ".join(
+        agent_call["args"]
+    )
+    assert result.metadata["python_executable"] == (
+        "/opt/miniconda3/envs/testbed/bin/python"
+    )
+    assert result.metadata["python_version"] == "3.9.20"
+    assert result.metadata["patchfox_runtime_python"] == (
+        "/opt/miniconda3/bin/python"
+    )
+    assert result.metadata["patchfox_runtime_python_version"] == "3.11.9"
+
+
+def test_swebench_image_metadata_records_real_outer_boundary(
+    tmp_path, monkeypatch
+):
+    docker = FakeDocker()
+    _mock_provider(monkeypatch)
+
+    result = run_swebench_instance(
+        replace(
+            _config(tmp_path),
+            execution_mode="swebench-image",
+            sandbox="required",
+            sandbox_backend="bubblewrap",
+        ),
+        dataset_loader=lambda dataset, split: [_dataset_row()],
+        docker_client=docker,
+    )
+
+    metadata = result.metadata
+    assert metadata["execution_mode"] == "swebench-image"
+    assert metadata["image"] == "swebench/PRIVATE_IMAGE_SECRET:latest"
+    assert metadata["image_digest"] == (
+        "swebench/PRIVATE_IMAGE_SECRET@sha256:abc123"
+    )
+    assert metadata["container_id"] == "container-123"
+    assert metadata["initial_image_head"] == "abc123"
+    assert metadata["approval"] == "auto"
+    assert metadata["outer_sandbox"] == "docker"
+    assert metadata["inner_sandbox"] == "off"
+    assert metadata["sandbox"] == "off"
+    assert metadata["sandbox_backend"] == "none"
+    assert metadata["effective_path"].startswith(
+        "/opt/miniconda3/envs/testbed/bin:"
+    )
+    assert metadata["patchfox_git_commit"]
+    assert metadata["container_cleanup"] == "completed"
+    assert metadata["evidence"]["manifest"]["patchfox_evidence_available"] is True
+
+
+def test_swebench_image_agent_failure_cleans_container_and_writes_empty_patch(
+    tmp_path, monkeypatch
+):
+    docker = FakeDocker(agent_returncode=9)
+    _mock_provider(monkeypatch)
+
+    result = run_swebench_instance(
+        replace(_config(tmp_path), execution_mode="swebench-image"),
+        dataset_loader=lambda dataset, split: [_dataset_row()],
+        docker_client=docker,
+    )
+
+    assert result.returncode == 1
+    assert result.prediction["model_patch"] == ""
+    assert docker.removed is True
+    assert result.metadata["patchfox_returncode"] == 9
+    assert result.metadata["container_cleanup"] == "completed"
+    assert (result.artifact_dir / "patch.diff").read_text(encoding="utf-8") == ""
+
+
+def test_swebench_image_setup_exception_still_cleans_container(
+    tmp_path, monkeypatch
+):
+    docker = FakeDocker(fail_runtime_install=True)
+    _mock_provider(monkeypatch)
+
+    result = run_swebench_instance(
+        replace(_config(tmp_path), execution_mode="swebench-image"),
+        dataset_loader=lambda dataset, split: [_dataset_row()],
+        docker_client=docker,
+    )
+
+    assert result.returncode == 1
+    assert result.prediction["model_patch"] == ""
+    assert docker.removed is True
+    assert result.metadata["container_cleanup"] == "completed"
+    assert result.metadata["failure_phase"] == "image_generation"
+    assert "runtime install failed" in result.metadata["error"]["message"]
+
+
+def test_swebench_image_create_exception_attempts_named_cleanup(
+    tmp_path, monkeypatch
+):
+    docker = FakeDocker(fail_create=True)
+    _mock_provider(monkeypatch)
+
+    result = run_swebench_instance(
+        replace(_config(tmp_path), execution_mode="swebench-image"),
+        dataset_loader=lambda dataset, split: [_dataset_row()],
+        docker_client=docker,
+    )
+
+    assert result.returncode == 1
+    assert result.prediction["model_patch"] == ""
+    assert docker.removed is True
+    assert result.metadata["container_cleanup"] == "completed"
+    assert "docker create failed" in result.metadata["error"]["message"]
 
 
 def test_metadata_records_explicit_runtime_controls(tmp_path):
@@ -268,10 +451,13 @@ def _dataset_row(base_commit="abc123"):
         "repo": "owner/repo",
         "base_commit": base_commit,
         "problem_statement": "Fix the public issue.",
+        "image": "swebench/PRIVATE_IMAGE_SECRET:latest",
         "patch": "GOLD_PATCH_SECRET",
         "test_patch": "TEST_PATCH_SECRET",
+        "eval_script": "EVAL_SCRIPT_SECRET",
         "FAIL_TO_PASS": ["FAIL_TEST_SECRET"],
         "PASS_TO_PASS": ["PASS_TEST_SECRET"],
+        "hints_text": "HINT_SECRET",
     }
 
 
@@ -302,6 +488,151 @@ def _capture_patchfox_command(tmp_path, monkeypatch, config):
 
 def _option_value(command, option):
     return command[command.index(option) + 1]
+
+
+def _mock_provider(monkeypatch):
+    provider = SimpleNamespace(
+        name="openai",
+        model="test-model",
+        protocol="openai",
+        base_url="https://provider.example.invalid/v1",
+        api_key="TOP_SECRET_API_KEY",
+    )
+    monkeypatch.setattr(
+        "patchfox.evaluation.swebench_runner._resolve_runtime_provider",
+        lambda config: provider,
+    )
+
+
+class FakeDocker:
+    def __init__(
+        self,
+        *,
+        agent_returncode=0,
+        fail_runtime_install=False,
+        fail_create=False,
+    ):
+        self.agent_returncode = agent_returncode
+        self.fail_runtime_install = fail_runtime_install
+        self.fail_create = fail_create
+        self.calls = []
+        self.prompt = ""
+        self.removed = False
+
+    def run(self, args, *, check=True, env=None):
+        args = [str(item) for item in args]
+        self.calls.append({"args": args, "env": dict(env or {})})
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+        if args[:2] == ["image", "inspect"]:
+            stdout = json.dumps(
+                [
+                    {
+                        "Id": "sha256:image-id",
+                        "RepoDigests": [
+                            "swebench/PRIVATE_IMAGE_SECRET@sha256:abc123"
+                        ],
+                    }
+                ]
+            )
+        elif args and args[0] == "create":
+            if self.fail_create:
+                raise RuntimeError("docker create failed")
+            stdout = "container-123\n"
+        elif args and args[0] == "rm":
+            self.removed = True
+        elif args and args[0] == "cp":
+            self._handle_cp(args)
+        elif args and args[0] == "exec":
+            command = self._exec_command(args)
+            if command[-3:] == ["git", "rev-parse", "HEAD"]:
+                stdout = "abc123\n"
+            elif command[-3:] == ["git", "status", "--porcelain"]:
+                stdout = ""
+            elif "import json,platform,sys" in " ".join(command):
+                if command[0] == "/opt/miniconda3/bin/python":
+                    stdout = json.dumps(
+                        {
+                            "executable": "/opt/miniconda3/bin/python",
+                            "version": "3.11.9",
+                            "version_info": [3, 11, 9],
+                        }
+                    )
+                else:
+                    stdout = json.dumps(
+                        {
+                            "executable": "/opt/miniconda3/envs/testbed/bin/python",
+                            "version": "3.9.20",
+                            "version_info": [3, 9, 20],
+                        }
+                    )
+            elif "--target" in command:
+                if self.fail_runtime_install:
+                    raise RuntimeError("runtime install failed")
+            elif "patchfox" in command:
+                returncode = self.agent_returncode
+                stdout = "PatchFox finished\n" if returncode == 0 else ""
+                stderr = "provider failed\n" if returncode else ""
+            elif command[-5:] == [
+                "git",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ]:
+                stdout = "brand_new.py\0.patchfox/runs/private.json\0"
+            elif "diff" in command:
+                stdout = (
+                    "diff --git a/brand_new.py b/brand_new.py\n"
+                    "new file mode 100644\n"
+                    "--- /dev/null\n"
+                    "+++ b/brand_new.py\n"
+                    "@@ -0,0 +1 @@\n"
+                    "+VALUE = 42\n"
+                )
+
+        completed = SimpleNamespace(
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        if check and returncode != 0:
+            raise RuntimeError(stderr or "fake docker command failed")
+        return completed
+
+    def _handle_cp(self, args):
+        source, destination = args[1], args[2]
+        if destination.endswith(":/opt/patchfox-input/problem_statement.txt"):
+            self.prompt = Path(source).read_text(encoding="utf-8")
+        if source.endswith(":/testbed/.patchfox"):
+            session_id = "swebench-smoke-001-owner__repo-123"
+            _write_evidence(Path(destination), session_id)
+
+    @staticmethod
+    def _exec_command(args):
+        return args[args.index("container-123") + 1 :]
+
+    def command_starting_with(self, value):
+        return next(call["args"] for call in self.calls if call["args"][0] == value)
+
+    def call_containing(self, value):
+        return next(call for call in self.calls if value in call["args"])
+
+    def command_containing(self, value):
+        return self.call_containing(value)["args"]
+
+    def command_ending_with(self, suffix):
+        return next(
+            call["args"]
+            for call in self.calls
+            if call["args"][-len(suffix) :] == suffix
+        )
+
+    def patchfox_command(self):
+        args = self.call_containing("patchfox")["args"]
+        return self._exec_command(args)
 
 
 def _instance(base_commit):

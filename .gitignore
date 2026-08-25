@@ -45,6 +45,11 @@ release/
 # Local tools
 .gstack/
 
+
+# result
+test_result/
+
+
 # Temporary files
 *.tmp
 *.temp

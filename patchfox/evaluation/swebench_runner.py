@@ -7,6 +7,7 @@ intended to be graded later by the official SWE-bench Docker harness.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -29,14 +30,27 @@ DEFAULT_DATASET = "SWE-bench/SWE-bench_Verified"
 DEFAULT_SPLIT = "test"
 DEFAULT_ARTIFACT_ROOT = Path("artifacts/swebench")
 APPROVAL_POLICIES = ("ask", "auto", "never")
+EXECUTION_MODES = ("host", "swebench-image")
+CONTAINER_WORKSPACE = "/testbed"
+CONTAINER_RUNTIME_PYTHON = "/opt/miniconda3/bin/python"
+CONTAINER_PATCHFOX_SOURCE = "/opt/patchfox-src"
+CONTAINER_PATCHFOX_RUNTIME = "/opt/patchfox-runtime"
+CONTAINER_INPUT_DIR = "/opt/patchfox-input"
+TESTBED_PATH = (
+    "/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:"
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
 PRIVATE_DATASET_FIELDS = frozenset(
     {
+        "image",
         "patch",
         "test_patch",
+        "eval_script",
         "FAIL_TO_PASS",
         "PASS_TO_PASS",
         "fail_to_pass",
         "pass_to_pass",
+        "hints_text",
     }
 )
 
@@ -49,6 +63,14 @@ class SWEbenchInstance:
     repo: str
     base_commit: str
     problem_statement: str
+
+
+@dataclass(frozen=True)
+class SWEbenchDatasetRecord:
+    """Public agent input plus execution-only adapter metadata."""
+
+    instance: SWEbenchInstance
+    image: str = ""
 
 
 @dataclass(frozen=True)
@@ -76,6 +98,8 @@ class SWEbenchRunConfig:
     approval: str = "auto"
     sandbox: str = "required"
     sandbox_backend: str = "auto"
+    execution_mode: str = "host"
+    docker_executable: str = "docker"
     python_executable: str = sys.executable
 
 
@@ -94,6 +118,36 @@ PatchFoxInvoker = Callable[[Path, str, str, SWEbenchRunConfig], PatchFoxInvocati
 CloneURLResolver = Callable[[str], str]
 
 
+class DockerCLI:
+    """Small Docker CLI boundary so adapter tests never need a daemon."""
+
+    def __init__(self, executable: str = "docker"):
+        self.executable = str(executable)
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        check: bool = True,
+        env: Mapping[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        completed = subprocess.run(
+            [self.executable, *map(str, args)],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            env=dict(env) if env is not None else None,
+        )
+        if check and completed.returncode != 0:
+            command = " ".join(map(str, args[:4]))
+            raise RuntimeError(
+                f"docker {command} failed: {completed.stderr.strip()}"
+            )
+        return completed
+
+
 def load_swebench_instance(
     dataset: str,
     split: str,
@@ -102,6 +156,23 @@ def load_swebench_instance(
     dataset_loader: DatasetLoader | None = None,
 ) -> SWEbenchInstance:
     """Load one row and immediately reduce it to non-answer issue metadata."""
+
+    return load_swebench_record(
+        dataset,
+        split,
+        instance_id,
+        dataset_loader=dataset_loader,
+    ).instance
+
+
+def load_swebench_record(
+    dataset: str,
+    split: str,
+    instance_id: str,
+    *,
+    dataset_loader: DatasetLoader | None = None,
+) -> SWEbenchDatasetRecord:
+    """Load public prompt data and keep the image adapter-internal."""
 
     loader = dataset_loader or _huggingface_dataset_loader
     for row in loader(dataset, split):
@@ -116,7 +187,10 @@ def load_swebench_instance(
             raise ValueError(
                 f"SWE-bench instance {instance_id!r} is missing: {', '.join(missing)}"
             )
-        return SWEbenchInstance(**values)
+        return SWEbenchDatasetRecord(
+            instance=SWEbenchInstance(**values),
+            image=str(row.get("image", "") or "").strip(),
+        )
     raise LookupError(
         f"instance_id {instance_id!r} was not found in {dataset!r} split {split!r}"
     )
@@ -194,11 +268,18 @@ def run_swebench_instance(
     dataset_loader: DatasetLoader | None = None,
     patchfox_invoker: PatchFoxInvoker | None = None,
     clone_url_resolver: CloneURLResolver | None = None,
+    docker_client: DockerCLI | None = None,
 ) -> SWEbenchRunResult:
     """Generate one SWE-bench prediction and persist adapter/evidence metadata."""
 
     _validate_component("instance_id", config.instance_id)
     _validate_component("run_id", config.run_id)
+    if config.execution_mode not in EXECUTION_MODES:
+        raise ValueError(f"execution_mode must be one of {EXECUTION_MODES}")
+    image_mode = config.execution_mode == "swebench-image"
+    actual_approval = "auto" if image_mode else config.approval
+    actual_sandbox = "off" if image_mode else config.sandbox
+    actual_sandbox_backend = "none" if image_mode else config.sandbox_backend
     artifact_dir = (
         Path(config.artifact_root).resolve() / config.run_id / config.instance_id
     )
@@ -219,57 +300,106 @@ def run_swebench_instance(
         "dataset": config.dataset,
         "split": config.split,
         "run_id": config.run_id,
-        "approval": config.approval,
-        "sandbox": config.sandbox,
-        "sandbox_backend": config.sandbox_backend,
+        "execution_mode": config.execution_mode,
+        "approval": actual_approval,
+        "sandbox": actual_sandbox,
+        "sandbox_backend": actual_sandbox_backend,
+        "outer_sandbox": "docker" if image_mode else "none",
+        "inner_sandbox": "off" if image_mode else actual_sandbox,
         "max_steps": config.max_steps,
         "max_new_tokens": config.max_new_tokens,
         "token_budget_scope": "per_model_call"
         if config.max_new_tokens
         else "runtime_default",
     }
+    if image_mode:
+        metadata.update(
+            {
+                "image": "",
+                "image_digest": "",
+                "image_id": "",
+                "container_id": "",
+                "container_workspace": CONTAINER_WORKSPACE,
+                "initial_image_head": "",
+                "effective_path": TESTBED_PATH,
+                "python_executable": "",
+                "python_version": "",
+                "patchfox_git_commit": _patchfox_git_commit(),
+            }
+        )
 
     try:
-        instance = load_swebench_instance(
+        record = load_swebench_record(
             config.dataset,
             config.split,
             config.instance_id,
             dataset_loader=dataset_loader,
         )
+        instance = record.instance
         metadata["instance"] = {
             "instance_id": instance.instance_id,
             "repo": instance.repo,
             "base_commit": instance.base_commit,
         }
+        if image_mode:
+            if not record.image:
+                raise ValueError(
+                    f"SWE-bench instance {instance.instance_id!r} has no image field"
+                )
+            metadata["image"] = record.image
 
         phase = "provider_resolution"
-        if patchfox_invoker is None or not effective_model:
-            effective_provider, effective_model = _resolve_runtime_identity(config)
+        provider_config = None
+        if image_mode or patchfox_invoker is None or not effective_model:
+            provider_config = _resolve_runtime_provider(config)
+            effective_provider = provider_config.name
+            effective_model = provider_config.model
         metadata["provider"] = effective_provider
         metadata["model"] = effective_model
         prediction = _prediction(config.instance_id, effective_model, "")
 
-        phase = "workspace_prepare"
         workspace = (
             Path(config.workspace_root).resolve()
             / config.run_id
             / config.instance_id
             / "repo"
         )
-        prepare_git_workspace(
-            instance, workspace, clone_url_resolver=clone_url_resolver
-        )
         metadata["workspace"] = str(workspace)
-
-        phase = "patchfox"
         session_id = _session_id(config.run_id, config.instance_id)
-        invoker = patchfox_invoker or invoke_patchfox_cli
-        invocation_config = replace(
-            config, provider=effective_provider or None, model=effective_model or None
-        )
-        invocation = invoker(
-            workspace, instance.problem_statement, session_id, invocation_config
-        )
+
+        if image_mode:
+            phase = "image_generation"
+            invocation, model_patch = _run_in_swebench_image(
+                config=config,
+                instance=instance,
+                image=record.image,
+                problem_statement=instance.problem_statement,
+                session_id=session_id,
+                provider_config=provider_config,
+                evidence_workspace=workspace,
+                metadata=metadata,
+                docker=docker_client or DockerCLI(config.docker_executable),
+            )
+        else:
+            phase = "workspace_prepare"
+            prepare_git_workspace(
+                instance, workspace, clone_url_resolver=clone_url_resolver
+            )
+            phase = "patchfox"
+            invoker = patchfox_invoker or invoke_patchfox_cli
+            invocation_config = replace(
+                config,
+                provider=effective_provider or None,
+                model=effective_model or None,
+            )
+            invocation = invoker(
+                workspace,
+                instance.problem_statement,
+                session_id,
+                invocation_config,
+            )
+            model_patch = ""
+
         stdout = invocation.stdout
         stderr = invocation.stderr
         metadata["patchfox_returncode"] = invocation.returncode
@@ -282,8 +412,9 @@ def run_swebench_instance(
                 f"PatchFox exited with return code {invocation.returncode}"
             )
 
-        phase = "patch_collect"
-        model_patch = collect_model_patch(workspace)
+        if not image_mode:
+            phase = "patch_collect"
+            model_patch = collect_model_patch(workspace)
         prediction = _prediction(config.instance_id, effective_model, model_patch)
         metadata["status"] = "completed"
         metadata["model_patch_bytes"] = len(model_patch.encode("utf-8"))
@@ -324,6 +455,432 @@ def run_swebench_instance(
         predictions_path=predictions_path,
         workspace=workspace,
     )
+
+
+def _run_in_swebench_image(
+    *,
+    config: SWEbenchRunConfig,
+    instance: SWEbenchInstance,
+    image: str,
+    problem_statement: str,
+    session_id: str,
+    provider_config: Any,
+    evidence_workspace: Path,
+    metadata: dict[str, Any],
+    docker: DockerCLI,
+) -> tuple[PatchFoxInvocation, str]:
+    """Run the unchanged PatchFox CLI inside an ephemeral official image."""
+
+    evidence_workspace = Path(evidence_workspace).resolve()
+    if evidence_workspace.exists():
+        raise FileExistsError(f"workspace already exists: {evidence_workspace}")
+    evidence_workspace.mkdir(parents=True)
+    metadata["patchfox_git_commit"] = _patchfox_git_commit()
+    container_id = ""
+    container_name = ""
+    container_started = False
+    evidence_exported = False
+    outcome: tuple[PatchFoxInvocation, str] | None = None
+    primary_error: Exception | None = None
+
+    try:
+        docker.run(["pull", image])
+        inspect = docker.run(["image", "inspect", image])
+        image_info = _parse_image_inspect(inspect.stdout, image)
+        metadata["image_digest"] = image_info["digest"]
+        metadata["image_id"] = image_info["id"]
+
+        container_name = _container_name(config.run_id, instance.instance_id)
+        created = docker.run(
+            [
+                "create",
+                "--name",
+                container_name,
+                "--entrypoint",
+                "/bin/sh",
+                image_info["id"],
+                "-lc",
+                "tail -f /dev/null",
+            ]
+        )
+        container_id = created.stdout.strip()
+        if not container_id:
+            raise RuntimeError("docker create returned an empty container id")
+        metadata["container_id"] = container_id
+        docker.run(["start", container_id])
+        container_started = True
+
+        initial_head = _docker_exec(
+            docker,
+            container_id,
+            ["git", "rev-parse", "HEAD"],
+            workdir=CONTAINER_WORKSPACE,
+        ).stdout.strip()
+        metadata["initial_image_head"] = initial_head
+        if not _same_commit(initial_head, instance.base_commit):
+            raise RuntimeError(
+                "official image HEAD does not match dataset base_commit: "
+                f"{initial_head} != {instance.base_commit}"
+            )
+        _require_clean_container_workspace(docker, container_id, "initial image")
+
+        runtime_info = _container_python_info(
+            docker, container_id, CONTAINER_RUNTIME_PYTHON
+        )
+        if tuple(runtime_info["version_info"][:2]) < (3, 10):
+            raise RuntimeError(
+                f"PatchFox runtime Python must be >=3.10, got {runtime_info['version']}"
+            )
+        metadata["patchfox_runtime_python"] = runtime_info["executable"]
+        metadata["patchfox_runtime_python_version"] = runtime_info["version"]
+
+        _install_patchfox_runtime(docker, container_id)
+        _docker_exec(
+            docker,
+            container_id,
+            ["python", "-m", "pip", "install", "-e", "."],
+            workdir=CONTAINER_WORKSPACE,
+            public_env={"PATH": TESTBED_PATH},
+        )
+        _require_clean_container_workspace(docker, container_id, "editable install")
+
+        testbed_info = _container_python_info(
+            docker,
+            container_id,
+            "python",
+            public_env={"PATH": TESTBED_PATH},
+        )
+        metadata["effective_path"] = TESTBED_PATH
+        metadata["python_executable"] = testbed_info["executable"]
+        metadata["python_version"] = testbed_info["version"]
+
+        invocation = _invoke_patchfox_in_container(
+            docker=docker,
+            container_id=container_id,
+            problem_statement=problem_statement,
+            session_id=session_id,
+            config=config,
+            provider_config=provider_config,
+        )
+        evidence_exported = _export_container_evidence(
+            docker, container_id, evidence_workspace
+        )
+        model_patch = (
+            collect_container_model_patch(
+                docker, container_id, base_ref=initial_head
+            )
+            if invocation.returncode == 0
+            else ""
+        )
+        outcome = (invocation, model_patch)
+    except Exception as exc:  # noqa: BLE001 - cleanup must run for every failure.
+        primary_error = exc
+    finally:
+        if container_started and not evidence_exported:
+            evidence_exported = _export_container_evidence(
+                docker, container_id, evidence_workspace
+            )
+        cleanup_target = container_id or container_name
+        if cleanup_target:
+            cleanup = docker.run(["rm", "-f", cleanup_target], check=False)
+            metadata["container_cleanup"] = (
+                "completed" if cleanup.returncode == 0 else "failed"
+            )
+            if cleanup.returncode != 0:
+                metadata["container_cleanup_error"] = cleanup.stderr.strip()
+                if primary_error is None:
+                    primary_error = RuntimeError(
+                        f"failed to remove generation container {cleanup_target}: "
+                        f"{cleanup.stderr.strip()}"
+                    )
+
+    if primary_error is not None:
+        raise primary_error
+    if outcome is None:  # pragma: no cover - defensive invariant.
+        raise RuntimeError("SWE-bench image run produced no outcome")
+    return outcome
+
+
+def _install_patchfox_runtime(docker: DockerCLI, container_id: str) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    _docker_exec(
+        docker,
+        container_id,
+        ["mkdir", "-p", CONTAINER_PATCHFOX_SOURCE, CONTAINER_PATCHFOX_RUNTIME],
+        user="root",
+    )
+    docker.run(
+        [
+            "cp",
+            str(source_root / "pyproject.toml"),
+            f"{container_id}:{CONTAINER_PATCHFOX_SOURCE}/pyproject.toml",
+        ]
+    )
+    docker.run(
+        [
+            "cp",
+            str(source_root / "patchfox"),
+            f"{container_id}:{CONTAINER_PATCHFOX_SOURCE}/patchfox",
+        ]
+    )
+    _docker_exec(
+        docker,
+        container_id,
+        [
+            CONTAINER_RUNTIME_PYTHON,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--target",
+            CONTAINER_PATCHFOX_RUNTIME,
+            CONTAINER_PATCHFOX_SOURCE,
+        ],
+        user="root",
+    )
+
+
+def _invoke_patchfox_in_container(
+    *,
+    docker: DockerCLI,
+    container_id: str,
+    problem_statement: str,
+    session_id: str,
+    config: SWEbenchRunConfig,
+    provider_config: Any,
+) -> PatchFoxInvocation:
+    prompt_path: Path | None = None
+    start = time.monotonic()
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".txt", delete=False
+        ) as handle:
+            handle.write(problem_statement)
+            prompt_path = Path(handle.name)
+        _docker_exec(
+            docker,
+            container_id,
+            ["mkdir", "-p", CONTAINER_INPUT_DIR],
+            user="root",
+        )
+        container_prompt = f"{CONTAINER_INPUT_DIR}/problem_statement.txt"
+        docker.run(["cp", str(prompt_path), f"{container_id}:{container_prompt}"])
+
+        container_config = ""
+        if config.config_path:
+            container_config = f"{CONTAINER_INPUT_DIR}/config.toml"
+            docker.run(
+                ["cp", str(Path(config.config_path).resolve()), f"{container_id}:{container_config}"]
+            )
+
+        command = [
+            CONTAINER_RUNTIME_PYTHON,
+            "-m",
+            "patchfox",
+            "--cwd",
+            CONTAINER_WORKSPACE,
+            "--prompt-file",
+            container_prompt,
+            "--session-id",
+            session_id,
+            "--non-interactive",
+            "--approval",
+            "auto",
+            "--sandbox",
+            "off",
+            "--sandbox-backend",
+            "none",
+            "--max-steps",
+            str(config.max_steps),
+            "--provider",
+            provider_config.name,
+            "--model",
+            provider_config.model,
+        ]
+        if container_config:
+            command.extend(["--config", container_config])
+        if provider_config.base_url:
+            command.extend(["--base-url", provider_config.base_url])
+        if config.max_new_tokens is not None:
+            command.extend(["--max-new-tokens", str(config.max_new_tokens)])
+
+        secret_env = {}
+        if provider_config.api_key:
+            secret_env["PATCHFOX_API_KEY"] = provider_config.api_key
+        completed = _docker_exec(
+            docker,
+            container_id,
+            command,
+            workdir=CONTAINER_WORKSPACE,
+            public_env={
+                "HOME": "/root",
+                "PATH": TESTBED_PATH,
+                "PYTHONPATH": CONTAINER_PATCHFOX_RUNTIME,
+                "PATCHFOX_PROTOCOL": provider_config.protocol,
+                "PYTHONUNBUFFERED": "1",
+            },
+            secret_env=secret_env,
+            check=False,
+        )
+        return PatchFoxInvocation(
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            wall_time_seconds=round(time.monotonic() - start, 6),
+        )
+    finally:
+        if prompt_path:
+            prompt_path.unlink(missing_ok=True)
+
+
+def collect_container_model_patch(
+    docker: DockerCLI, container_id: str, *, base_ref: str = "HEAD"
+) -> str:
+    raw = _docker_exec(
+        docker,
+        container_id,
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        workdir=CONTAINER_WORKSPACE,
+    ).stdout
+    untracked = [
+        path
+        for path in raw.split("\0")
+        if path and not _is_patchfox_state_path(path)
+    ]
+    if untracked:
+        _docker_exec(
+            docker,
+            container_id,
+            ["git", "--literal-pathspecs", "add", "--intent-to-add", "--", *untracked],
+            workdir=CONTAINER_WORKSPACE,
+        )
+    return _docker_exec(
+        docker,
+        container_id,
+        [
+            "git",
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            base_ref,
+            "--",
+            ".",
+            ":(exclude).patchfox",
+            ":(exclude).patchfox/**",
+        ],
+        workdir=CONTAINER_WORKSPACE,
+    ).stdout
+
+
+def _docker_exec(
+    docker: DockerCLI,
+    container_id: str,
+    command: Sequence[str],
+    *,
+    workdir: str | None = None,
+    user: str | None = None,
+    public_env: Mapping[str, str] | None = None,
+    secret_env: Mapping[str, str] | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    args = ["exec"]
+    if workdir:
+        args.extend(["--workdir", workdir])
+    if user:
+        args.extend(["--user", user])
+    for name, value in (public_env or {}).items():
+        args.extend(["--env", f"{name}={value}"])
+    process_env = dict(os.environ)
+    for name, value in (secret_env or {}).items():
+        process_env[name] = value
+        args.extend(["--env", name])
+    args.append(container_id)
+    args.extend(map(str, command))
+    return docker.run(args, check=check, env=process_env)
+
+
+def _container_python_info(
+    docker: DockerCLI,
+    container_id: str,
+    python: str,
+    *,
+    public_env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    script = (
+        "import json,platform,sys; "
+        "print(json.dumps({'executable':sys.executable,'version':platform.python_version(),"
+        "'version_info':list(sys.version_info[:3])}))"
+    )
+    completed = _docker_exec(
+        docker,
+        container_id,
+        [python, "-c", script],
+        public_env=public_env,
+    )
+    try:
+        return dict(json.loads(completed.stdout.strip()))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid Python diagnostics: {completed.stdout!r}") from exc
+
+
+def _require_clean_container_workspace(
+    docker: DockerCLI, container_id: str, phase: str
+) -> None:
+    status = _docker_exec(
+        docker,
+        container_id,
+        ["git", "status", "--porcelain"],
+        workdir=CONTAINER_WORKSPACE,
+    ).stdout
+    if status.strip():
+        raise RuntimeError(f"{phase} left /testbed dirty: {status.strip()}")
+
+
+def _export_container_evidence(
+    docker: DockerCLI, container_id: str, evidence_workspace: Path
+) -> bool:
+    completed = docker.run(
+        ["cp", f"{container_id}:{CONTAINER_WORKSPACE}/.patchfox", str(evidence_workspace)],
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _parse_image_inspect(raw: str, image: str) -> dict[str, str]:
+    try:
+        values = json.loads(raw)
+        info = values[0]
+    except (IndexError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid docker image inspect output for {image!r}") from exc
+    repo_digests = info.get("RepoDigests") or []
+    image_id = str(info.get("Id", ""))
+    digest = str(repo_digests[0] if repo_digests else info.get("Id", ""))
+    if not digest or not image_id:
+        raise RuntimeError(f"docker image inspect returned no identity for {image!r}")
+    return {"digest": digest, "id": image_id}
+
+
+def _container_name(run_id: str, instance_id: str) -> str:
+    raw = f"patchfox-sweb-{run_id}-{instance_id}".lower()
+    safe = "".join(char if char.isalnum() or char in "_.-" else "-" for char in raw)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+    return f"{safe[:100]}-{digest}"
+
+
+def _same_commit(left: str, right: str) -> bool:
+    left = str(left).strip().lower()
+    right = str(right).strip().lower()
+    return bool(left and right and (left.startswith(right) or right.startswith(left)))
+
+
+def _patchfox_git_commit() -> str:
+    try:
+        return _run_git(
+            ["rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2]
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001 - diagnostics must not block generation.
+        return "unknown"
 
 
 def invoke_patchfox_cli(
@@ -416,6 +973,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--workspace-root", default="/tmp/patchfox-swebench")
     parser.add_argument("--artifact-root", default=str(DEFAULT_ARTIFACT_ROOT))
+    parser.add_argument(
+        "--execution-mode",
+        choices=EXECUTION_MODES,
+        default="host",
+        help=(
+            "Execution environment. 'host' keeps the required Bubblewrap path; "
+            "'swebench-image' runs PatchFox inside the official instance container "
+            "with Docker as the outer sandbox and the inner sandbox off."
+        ),
+    )
     parser.add_argument("--provider", default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--config", dest="config_path", default=None)
@@ -428,7 +995,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Approval policy passed to PatchFox. 'auto' permits risky tools without "
             "human confirmation, while ToolPolicy, workspace path checks, and the "
-            "sandbox still apply."
+            "selected execution boundary still apply. swebench-image always uses auto."
         ),
     )
     parser.add_argument(
@@ -437,7 +1004,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="required",
         help=(
             "Sandbox mode for run_shell. 'required' fails closed when the configured "
-            "sandbox backend is unavailable."
+            "sandbox backend is unavailable. Host mode only; swebench-image forces "
+            "the inner sandbox off and uses Docker as its outer boundary."
         ),
     )
     parser.add_argument(
@@ -446,7 +1014,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="auto",
         help=(
             "Existing PatchFox sandbox backend selector. 'auto' selects an available "
-            "supported backend."
+            "supported backend. Host mode only."
         ),
     )
     parser.add_argument(
@@ -476,6 +1044,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         approval=args.approval,
         sandbox=args.sandbox,
         sandbox_backend=args.sandbox_backend,
+        execution_mode=args.execution_mode,
     )
     result = run_swebench_instance(config)
     print(json.dumps(result.prediction, ensure_ascii=False))
@@ -496,15 +1065,14 @@ def _huggingface_dataset_loader(
     return load_dataset(dataset, split=split, streaming=True)
 
 
-def _resolve_runtime_identity(config: SWEbenchRunConfig) -> tuple[str, str]:
-    provider_config = resolve_provider_config(
+def _resolve_runtime_provider(config: SWEbenchRunConfig):
+    return resolve_provider_config(
         config.provider,
         start=Path.cwd(),
         config_path=config.config_path,
         model=config.model,
         base_url=config.base_url,
     )
-    return provider_config.name, provider_config.model
 
 
 def _collect_evidence(

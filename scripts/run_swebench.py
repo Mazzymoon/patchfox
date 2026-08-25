@@ -1,7 +1,7 @@
 """Generate one SWE-bench prediction with PatchFox.
 
-The delegated runner CLI exposes approval and sandbox controls and defaults to
-unattended, fail-closed execution (approval=auto, sandbox=required).
+The delegated runner CLI supports host Bubblewrap execution and an official
+SWE-bench image mode that uses Docker as the explicit outer sandbox.
 """
 
 import sys

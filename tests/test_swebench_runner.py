@@ -1,11 +1,15 @@
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from patchfox.evaluation.swebench_runner import (
     PatchFoxInvocation,
     SWEbenchRunConfig,
+    build_arg_parser,
     collect_model_patch,
+    invoke_patchfox_cli,
     load_swebench_instance,
     prepare_git_workspace,
     run_swebench_instance,
@@ -97,6 +101,68 @@ def test_run_generates_official_prediction_without_leaking_gold_fields(tmp_path)
     assert (result.artifact_dir / "stdout.log").read_text(
         encoding="utf-8"
     ) == "PatchFox finished\n"
+    assert result.metadata["approval"] == "auto"
+    assert result.metadata["sandbox"] == "required"
+    assert result.metadata["sandbox_backend"] == "auto"
+
+
+def test_default_patchfox_cli_uses_unattended_fail_closed_controls(
+    tmp_path, monkeypatch
+):
+    command = _capture_patchfox_command(tmp_path, monkeypatch, _config(tmp_path))
+
+    assert _option_value(command, "--approval") == "auto"
+    assert _option_value(command, "--sandbox") == "required"
+    assert _option_value(command, "--sandbox-backend") == "auto"
+    assert "--non-interactive" in command
+    assert "never" not in command
+
+
+def test_explicit_runtime_controls_are_passed_to_patchfox(tmp_path, monkeypatch):
+    config = replace(
+        _config(tmp_path),
+        approval="never",
+        sandbox="best_effort",
+        sandbox_backend="bubblewrap",
+    )
+
+    command = _capture_patchfox_command(tmp_path, monkeypatch, config)
+
+    assert _option_value(command, "--approval") == "never"
+    assert _option_value(command, "--sandbox") == "best_effort"
+    assert _option_value(command, "--sandbox-backend") == "bubblewrap"
+
+
+def test_runner_cli_exposes_runtime_controls_with_safe_defaults():
+    parser = build_arg_parser()
+    args = parser.parse_args(
+        ["--instance-id", INSTANCE_ID, "--run-id", "smoke-001"]
+    )
+
+    assert args.approval == "auto"
+    assert args.sandbox == "required"
+    assert args.sandbox_backend == "auto"
+    help_text = parser.format_help()
+    assert "risky tools without human confirmation" in help_text
+    assert "fails closed" in help_text
+
+
+def test_metadata_records_explicit_runtime_controls(tmp_path):
+    config = replace(
+        _config(tmp_path),
+        approval="never",
+        sandbox="off",
+        sandbox_backend="none",
+    )
+
+    result = run_swebench_instance(
+        config,
+        dataset_loader=lambda dataset, split: [],
+    )
+
+    assert result.metadata["approval"] == "never"
+    assert result.metadata["sandbox"] == "off"
+    assert result.metadata["sandbox_backend"] == "none"
 
 
 def test_new_untracked_file_is_included_but_patchfox_state_is_excluded(tmp_path):
@@ -207,6 +273,35 @@ def _dataset_row(base_commit="abc123"):
         "FAIL_TO_PASS": ["FAIL_TEST_SECRET"],
         "PASS_TO_PASS": ["PASS_TEST_SECRET"],
     }
+
+
+def _capture_patchfox_command(tmp_path, monkeypatch, config):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        prompt_path = Path(_option_value(command, "--prompt-file"))
+        assert prompt_path.read_text(encoding="utf-8") == "Fix the public issue."
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "patchfox.evaluation.swebench_runner.subprocess.run", fake_run
+    )
+    invocation = invoke_patchfox_cli(
+        workspace,
+        "Fix the public issue.",
+        "swebench-smoke-001-owner__repo-123",
+        config,
+    )
+
+    assert invocation.returncode == 0
+    return captured["command"]
+
+
+def _option_value(command, option):
+    return command[command.index(option) + 1]
 
 
 def _instance(base_commit):

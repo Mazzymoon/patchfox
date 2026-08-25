@@ -1,4 +1,8 @@
-"""Generate one SWE-bench prediction with PatchFox."""
+"""Generate one SWE-bench prediction with PatchFox.
+
+The delegated runner CLI exposes approval and sandbox controls and defaults to
+unattended, fail-closed execution (approval=auto, sandbox=required).
+"""
 
 import sys
 from pathlib import Path

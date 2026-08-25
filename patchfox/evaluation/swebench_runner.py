@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import resolve_provider_config
+from ..features.sandbox.config import SANDBOX_BACKENDS, SANDBOX_MODES
 from .context_cost import extract_usage_from_artifacts
 from .harnessbench import build_adapter_metadata
 from .metrics import aggregate_run_artifacts
@@ -27,6 +28,7 @@ from .run_evidence import RunEvidence
 DEFAULT_DATASET = "SWE-bench/SWE-bench_Verified"
 DEFAULT_SPLIT = "test"
 DEFAULT_ARTIFACT_ROOT = Path("artifacts/swebench")
+APPROVAL_POLICIES = ("ask", "auto", "never")
 PRIVATE_DATASET_FIELDS = frozenset(
     {
         "patch",
@@ -71,6 +73,9 @@ class SWEbenchRunConfig:
     base_url: str | None = None
     max_steps: int = 30
     max_new_tokens: int | None = None
+    approval: str = "auto"
+    sandbox: str = "required"
+    sandbox_backend: str = "auto"
     python_executable: str = sys.executable
 
 
@@ -214,7 +219,9 @@ def run_swebench_instance(
         "dataset": config.dataset,
         "split": config.split,
         "run_id": config.run_id,
-        "approval": "never",
+        "approval": config.approval,
+        "sandbox": config.sandbox,
+        "sandbox_backend": config.sandbox_backend,
         "max_steps": config.max_steps,
         "max_new_tokens": config.max_new_tokens,
         "token_budget_scope": "per_model_call"
@@ -354,7 +361,11 @@ def invoke_patchfox_cli(
             session_id,
             "--non-interactive",
             "--approval",
-            "never",
+            config.approval,
+            "--sandbox",
+            config.sandbox,
+            "--sandbox-backend",
+            config.sandbox_backend,
             "--max-steps",
             str(config.max_steps),
         ]
@@ -411,6 +422,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--max-steps", type=int, default=30)
     parser.add_argument(
+        "--approval",
+        choices=APPROVAL_POLICIES,
+        default="auto",
+        help=(
+            "Approval policy passed to PatchFox. 'auto' permits risky tools without "
+            "human confirmation, while ToolPolicy, workspace path checks, and the "
+            "sandbox still apply."
+        ),
+    )
+    parser.add_argument(
+        "--sandbox",
+        choices=sorted(SANDBOX_MODES),
+        default="required",
+        help=(
+            "Sandbox mode for run_shell. 'required' fails closed when the configured "
+            "sandbox backend is unavailable."
+        ),
+    )
+    parser.add_argument(
+        "--sandbox-backend",
+        choices=sorted(SANDBOX_BACKENDS),
+        default="auto",
+        help=(
+            "Existing PatchFox sandbox backend selector. 'auto' selects an available "
+            "supported backend."
+        ),
+    )
+    parser.add_argument(
         "--max-new-tokens",
         type=int,
         default=None,
@@ -434,6 +473,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         base_url=args.base_url,
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
+        approval=args.approval,
+        sandbox=args.sandbox,
+        sandbox_backend=args.sandbox_backend,
     )
     result = run_swebench_instance(config)
     print(json.dumps(result.prediction, ensure_ascii=False))

@@ -1,10 +1,12 @@
 """Tool-call validation, authorization, execution, and evidence recording."""
+
 import re
 
+from .convergence_guard import reject_tool_call
 from .governance import record_governance_decision
 from .tool_policy import ToolPolicyChecker
-from .tool_result_artifacts import prepare_tool_result_observation
 from .tool_repetition import repeated_tool_call_metadata
+from .tool_result_artifacts import prepare_tool_result_observation
 
 
 def run_tool(agent, name, args):
@@ -24,10 +26,7 @@ def run_tool(agent, name, args):
         if example:
             message += f"\nexample: {example}"
         security_event_type = "path_escape" if "path escapes workspace" in str(exc) else ""
-        agent._last_tool_result_metadata = _tool_result_metadata(
-            tool, status="rejected", error_code="invalid_arguments",
-            security_event_type=security_event_type,
-        )
+        agent._last_tool_result_metadata = _tool_result_metadata(tool, status="rejected", error_code="invalid_arguments", security_event_type=security_event_type)
         record_governance_decision(
             agent, name, args, decision="deny", reason_code="invalid_arguments",
             decision_type="tool_validation", original_reason=str(exc),
@@ -68,6 +67,8 @@ def run_tool(agent, name, args):
         )
         agent.record_process_note_for_tool(name, agent._last_tool_result_metadata)
         return policy.message
+    if (guard_message := reject_tool_call(agent, tool, name, args)) is not None:
+        return guard_message
     before_snapshot = agent.capture_workspace_snapshot() if tool.risky else {}
     after_snapshot = before_snapshot
     try:
@@ -120,8 +121,6 @@ def run_tool(agent, name, args):
         )
         agent.record_process_note_for_tool(name, agent._last_tool_result_metadata)
         return f"error: tool {name} failed: {exc}"
-
-
 def _run_shell_exit_code(result):
     match = re.search(r"exit_code:\s*(-?\d+)", str(result))
     return int(match.group(1)) if match else 0

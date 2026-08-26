@@ -45,6 +45,16 @@ PROGRESS_STATE_DEFAULTS = {
     "first_convergence_step": None,
     "hard_convergence_triggered": False,
     "hard_convergence_step": None,
+    # P3 pre-edit exploration guard. These are strategy metrics, not security.
+    "hard_tool_gating_active": False,
+    "hard_tool_gating_trigger_step": None,
+    "hard_tool_rejection_count": 0,
+    "hard_search_rejection_count": 0,
+    "hard_list_rejection_count": 0,
+    "hard_read_rejection_count": 0,
+    "hard_targeted_read_used": 0,
+    "hard_targeted_read_remaining": 2,
+    "convergence_guard_event_counts": {},
     "soft_convergence_hint_pending": False,
     "soft_convergence_hint_injected": False,
     "patch_file_calls": 0,
@@ -58,6 +68,7 @@ def default_runtime_progress_state():
     state = dict(PROGRESS_STATE_DEFAULTS)
     state["phase_transitions"] = []
     state["convergence_controller_errors"] = []
+    state["convergence_guard_event_counts"] = {}
     return state
 
 
@@ -74,6 +85,8 @@ def runtime_progress_state_from_dict(data):
             value = None if value is None else int(value)
         elif isinstance(default, list):
             value = list(value or [])
+        elif isinstance(default, dict):
+            value = dict(value or {})
         else:
             value = str(value)
         state[key] = value
@@ -89,6 +102,11 @@ def runtime_progress_state_from_dict(data):
         state["has_changed_workspace"] = bool(
             state["first_change_step"] is not None or data.get("changed_paths")
         )
+    if "hard_tool_gating_active" not in data and (
+        state["hard_convergence_triggered"] and not state["has_changed_workspace"]
+    ):
+        state["hard_tool_gating_active"] = True
+        state["hard_tool_gating_trigger_step"] = state["hard_convergence_step"]
     if state["current_phase"] not in CONVERGENCE_PHASES:
         state["current_phase"] = (
             PHASE_VERIFY if state["has_changed_workspace"] else PHASE_EXPLORE
@@ -101,6 +119,7 @@ class RuntimeProgressConfig:
     relevant_memory_source_cooldown_steps: int = 3
     convergence_explore_threshold: int = 15
     hard_convergence_explore_threshold: int = 25
+    hard_targeted_read_allowance: int = 2
     # Retained for API compatibility; P2 deliberately does not use remaining-step
     # warnings or a delayed verification threshold as extra interventions.
     convergence_verify_threshold: int = 5
@@ -120,6 +139,9 @@ class RuntimeProgress:
         state = task_state.runtime_progress
         state["phase_hint"] = "explore"
         state["current_phase"] = PHASE_EXPLORE
+        state["hard_targeted_read_remaining"] = int(
+            self.config.hard_targeted_read_allowance
+        )
         if not state["phase_transitions"]:
             state["phase_transitions"].append(
                 {
@@ -168,6 +190,11 @@ class RuntimeProgress:
             state["post_change_explore_steps"] = 0
             state["verification_after_change"] = False
             state["soft_convergence_hint_pending"] = False
+            state["hard_tool_gating_active"] = False
+            state["hard_targeted_read_used"] = 0
+            state["hard_targeted_read_remaining"] = int(
+                self.config.hard_targeted_read_allowance
+            )
             transition = self._transition(
                 state, PHASE_VERIFY, step, "workspace_changed"
             )
@@ -234,12 +261,28 @@ class RuntimeProgress:
             state["convergence_trigger_count"] += 1
             state["hard_convergence_triggered"] = True
             state["hard_convergence_step"] = step
+            state["hard_tool_gating_active"] = True
+            state["hard_tool_gating_trigger_step"] = step
+            state["hard_targeted_read_used"] = 0
+            state["hard_targeted_read_remaining"] = int(
+                self.config.hard_targeted_read_allowance
+            )
+            _increment_guard_event(state, "activated")
             state["soft_convergence_hint_pending"] = False
             transition = self._transition(
                 state, PHASE_MODIFY, step, "hard_threshold_reached"
             )
             if transition:
                 events.append(transition)
+            events.append(
+                {
+                    "event": "convergence_tool_gating_activated",
+                    "step": step,
+                    "hard_targeted_read_remaining": state[
+                        "hard_targeted_read_remaining"
+                    ],
+                }
+            )
         return events
 
     def _apply_verification_result(self, state, *, step, command_class, status):
@@ -419,6 +462,17 @@ def convergence_report_fields(state):
         "first_convergence_step": state.get("first_convergence_step"),
         "hard_convergence_triggered": state.get("hard_convergence_triggered"),
         "hard_convergence_step": state.get("hard_convergence_step"),
+        "hard_tool_gating_active": state.get("hard_tool_gating_active"),
+        "hard_tool_gating_trigger_step": state.get("hard_tool_gating_trigger_step"),
+        "hard_tool_rejection_count": state.get("hard_tool_rejection_count"),
+        "hard_search_rejection_count": state.get("hard_search_rejection_count"),
+        "hard_list_rejection_count": state.get("hard_list_rejection_count"),
+        "hard_read_rejection_count": state.get("hard_read_rejection_count"),
+        "hard_targeted_read_used": state.get("hard_targeted_read_used"),
+        "hard_targeted_read_remaining": state.get("hard_targeted_read_remaining"),
+        "convergence_guard_event_counts": dict(
+            state.get("convergence_guard_event_counts") or {}
+        ),
         "phase_transitions": list(state.get("phase_transitions") or []),
         "steps_since_last_change": state.get("steps_since_last_change"),
         "steps_since_last_change_peak": state.get("steps_since_last_change_peak"),
@@ -447,6 +501,11 @@ def record_convergence_controller_error(task_state, *, stage, error):
         payload
     )
     return payload
+
+
+def _increment_guard_event(state, event):
+    counts = state.setdefault("convergence_guard_event_counts", {})
+    counts[event] = int(counts.get(event, 0) or 0) + 1
 
 
 def _inactive_prompt_context(max_steps):

@@ -60,6 +60,14 @@ CSV_FIELDS = (
     "first_convergence_step",
     "hard_convergence_triggered",
     "hard_convergence_step",
+    "hard_tool_gating_active",
+    "hard_tool_gating_trigger_step",
+    "hard_tool_rejection_count",
+    "hard_search_rejection_count",
+    "hard_list_rejection_count",
+    "hard_read_rejection_count",
+    "hard_targeted_read_used",
+    "hard_targeted_read_remaining",
     "phase_transitions",
     "steps_since_last_change_peak",
     "tool_steps",
@@ -849,6 +857,30 @@ def _per_instance_row(
             task_metric("hard_convergence_triggered")
         ),
         "hard_convergence_step": _number_or_none(task_metric("hard_convergence_step")),
+        "hard_tool_gating_active": _bool_or_none(
+            task_metric("hard_tool_gating_active")
+        ),
+        "hard_tool_gating_trigger_step": _number_or_none(
+            task_metric("hard_tool_gating_trigger_step")
+        ),
+        "hard_tool_rejection_count": _number_or_none(
+            task_metric("hard_tool_rejection_count")
+        ),
+        "hard_search_rejection_count": _number_or_none(
+            task_metric("hard_search_rejection_count")
+        ),
+        "hard_list_rejection_count": _number_or_none(
+            task_metric("hard_list_rejection_count")
+        ),
+        "hard_read_rejection_count": _number_or_none(
+            task_metric("hard_read_rejection_count")
+        ),
+        "hard_targeted_read_used": _number_or_none(
+            task_metric("hard_targeted_read_used")
+        ),
+        "hard_targeted_read_remaining": _number_or_none(
+            task_metric("hard_targeted_read_remaining")
+        ),
         "phase_transitions": task_metric("phase_transitions"),
         "steps_since_last_change_peak": _number_or_none(
             task_metric("steps_since_last_change_peak")
@@ -957,6 +989,7 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     duplicate_total, _, _ = stats("duplicate_source_filtered_count")
     recent_total, _, _ = stats("recent_source_filtered_count")
     convergence_total, convergence_mean, _ = stats("convergence_trigger_count")
+    guard_total, guard_mean, _ = stats("hard_tool_rejection_count")
     controller_rows = [
         row
         for row in rows
@@ -973,6 +1006,16 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if controller_rows
         else None
     )
+    guard_metric_rows = [
+        row
+        for row in rows
+        if row.get("hard_tool_gating_trigger_step") is not None
+        or row.get("hard_tool_rejection_count") is not None
+    ]
+    guard_rows = [
+        row for row in guard_metric_rows
+        if row.get("hard_tool_gating_trigger_step") is not None
+    ]
     phase_transition_values = [
         len(row["phase_transitions"])
         for row in rows
@@ -1069,6 +1112,21 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             )
             if controller_error_values
             else None,
+        },
+        "p3_tool_convergence_guard": {
+            "hard_tool_gating_instance_count": (
+                len(guard_rows) if guard_metric_rows else None
+            ),
+            "hard_tool_gating_instance_rate": (
+                _rate(len(guard_rows), len(guard_metric_rows))
+                if guard_metric_rows
+                else None
+            ),
+            "total_hard_tool_rejections": guard_total,
+            "mean_hard_tool_rejections": guard_mean,
+            "mean_hard_targeted_reads_used": _mean(
+                values("hard_targeted_read_used")
+            ),
         },
         "time": {
             "total_patchfox_wall_time": patchfox_total,

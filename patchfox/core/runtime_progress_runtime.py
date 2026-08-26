@@ -1,5 +1,7 @@
 """Runtime boundary for the event-driven convergence controller."""
 
+from .convergence_guard import ConvergenceGuardDecision
+from .convergence_guard import decide as decide_guard
 from .runtime_progress import (
     convergence_report_fields,
     record_convergence_controller_error,
@@ -14,6 +16,35 @@ class RuntimeProgressRuntimeMixin:
             self.runtime_progress.start_turn(task_state)
         except Exception as exc:  # noqa: BLE001 - controller must fail open with evidence.
             self._record_convergence_controller_error(task_state, "start_turn", exc)
+
+    def convergence_guard_decision(self, name, args):
+        """Decide P3 pre-edit gating and fail open if its controller errors."""
+
+        task_state = self.current_task_state
+        if task_state is None:
+            return ConvergenceGuardDecision(True)
+        try:
+            decision = decide_guard(task_state, str(name or ""), self.runtime_progress.config)
+            if not decision.allowed:
+                self.emit_trace(
+                    task_state,
+                    "convergence_guard_rejected",
+                    {
+                        "tool_name": str(name or ""),
+                        "reason": decision.reason,
+                        "rejection_source": "convergence_guard",
+                        "hard_targeted_read_used": task_state.runtime_progress[
+                            "hard_targeted_read_used"
+                        ],
+                        "hard_targeted_read_remaining": task_state.runtime_progress[
+                            "hard_targeted_read_remaining"
+                        ],
+                    },
+                )
+            return decision
+        except Exception as exc:  # noqa: BLE001 - convergence must not block work.
+            self._record_convergence_controller_error(task_state, "tool_guard", exc)
+            return ConvergenceGuardDecision(True)
 
     def record_runtime_progress_after_tool(self, task_state, name, args, metadata):
         progress_args = dict(args or {})

@@ -15,6 +15,8 @@ PHASE_BY_EVENT = {
     "convergence_phase_transition": "convergence",
     "convergence_verification": "convergence",
     "convergence_controller_error": "convergence",
+    "convergence_tool_gating_activated": "convergence",
+    "convergence_guard_rejected": "convergence",
     "model_requested": "model",
     "model_parsed": "parse",
     "loop_transition": "loop",

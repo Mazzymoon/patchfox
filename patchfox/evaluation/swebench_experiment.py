@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..core.runtime_progress import RuntimeProgressConfig
 from .run_evidence import RunEvidence
 from .swebench_runner import (
     APPROVAL_POLICIES,
@@ -54,6 +55,13 @@ CSV_FIELDS = (
     "model_patch_bytes",
     "changed_paths",
     "stop_reason",
+    "current_phase",
+    "convergence_trigger_count",
+    "first_convergence_step",
+    "hard_convergence_triggered",
+    "hard_convergence_step",
+    "phase_transitions",
+    "steps_since_last_change_peak",
     "tool_steps",
     "model_calls",
     "input_tokens",
@@ -71,6 +79,7 @@ CSV_FIELDS = (
     "overlapping_read_count",
     "duplicate_source_filtered_count",
     "recent_source_filtered_count",
+    "convergence_controller_errors",
     "patchfox_wall_time_seconds",
     "adapter_wall_time_seconds",
     "error_type",
@@ -268,6 +277,7 @@ def prepare_experiment_config(
 
     created_at = str(existing.get("created_at") or utc_now())
     git_commit, git_dirty = _git_identity()
+    controller_config = RuntimeProgressConfig()
     payload = {
         "schema_version": 1,
         "experiment_id": config.experiment_id,
@@ -290,6 +300,12 @@ def prepare_experiment_config(
         "approval": config.approval,
         "sandbox": config.sandbox,
         "sandbox_backend": config.sandbox_backend,
+        "convergence_controller": {
+            "enabled": True,
+            "soft_threshold": controller_config.convergence_explore_threshold,
+            "hard_threshold": controller_config.hard_convergence_explore_threshold,
+            "phases": ["EXPLORE", "CONVERGE", "MODIFY", "VERIFY"],
+        },
         "workspace_root": str(Path(config.workspace_root).resolve()),
         "artifact_root": str(Path(config.artifact_root).resolve()),
         "config_path": str(Path(config.config_path).resolve())
@@ -822,6 +838,21 @@ def _per_instance_row(
         "model_patch_bytes": _number_or_none(patch_bytes),
         "changed_paths": list(changed_paths),
         "stop_reason": report.get("stop_reason") or evidence.get("stop_reason"),
+        "current_phase": task_metric("current_phase"),
+        "convergence_trigger_count": _number_or_none(
+            task_metric("convergence_trigger_count")
+        ),
+        "first_convergence_step": _number_or_none(
+            task_metric("first_convergence_step")
+        ),
+        "hard_convergence_triggered": _bool_or_none(
+            task_metric("hard_convergence_triggered")
+        ),
+        "hard_convergence_step": _number_or_none(task_metric("hard_convergence_step")),
+        "phase_transitions": task_metric("phase_transitions"),
+        "steps_since_last_change_peak": _number_or_none(
+            task_metric("steps_since_last_change_peak")
+        ),
         "tool_steps": _first_number(
             evidence.get("tool_steps"), report.get("tool_steps")
         ),
@@ -835,8 +866,14 @@ def _per_instance_row(
         "read_file_calls": _tool_count_or_none(tools, "read_file", trace),
         "search_calls": _tool_count_or_none(tools, "search", trace),
         "run_shell_calls": _tool_count_or_none(tools, "run_shell", trace),
-        "patch_file_calls": _tool_count_or_none(tools, "patch_file", trace),
-        "write_file_calls": _tool_count_or_none(tools, "write_file", trace),
+        "patch_file_calls": _first_number(
+            task_metric("patch_file_calls"),
+            _tool_count_or_none(tools, "patch_file", trace),
+        ),
+        "write_file_calls": _first_number(
+            task_metric("write_file_calls"),
+            _tool_count_or_none(tools, "write_file", trace),
+        ),
         "first_change_step": _number_or_none(task_metric("first_change_step")),
         "verification_after_change": _bool_or_none(
             task_metric("verification_after_change")
@@ -856,6 +893,7 @@ def _per_instance_row(
         "recent_source_filtered_count": _sum_event_field_or_none(
             memory_events, "recent_source_filtered_count"
         ),
+        "convergence_controller_errors": task_metric("convergence_controller_errors"),
         "patchfox_wall_time_seconds": _number_or_none(
             metadata.get("patchfox_wall_time_seconds")
         ),
@@ -918,6 +956,33 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     overlap_total, overlap_mean, _ = stats("overlapping_read_count")
     duplicate_total, _, _ = stats("duplicate_source_filtered_count")
     recent_total, _, _ = stats("recent_source_filtered_count")
+    convergence_total, convergence_mean, _ = stats("convergence_trigger_count")
+    controller_rows = [
+        row
+        for row in rows
+        if row.get("convergence_trigger_count") is not None
+        or row.get("current_phase") is not None
+    ]
+    soft_triggered = (
+        sum(row.get("first_convergence_step") is not None for row in controller_rows)
+        if controller_rows
+        else None
+    )
+    hard_triggered = (
+        sum(row.get("hard_convergence_triggered") is True for row in controller_rows)
+        if controller_rows
+        else None
+    )
+    phase_transition_values = [
+        len(row["phase_transitions"])
+        for row in rows
+        if isinstance(row.get("phase_transitions"), list)
+    ]
+    controller_error_values = [
+        len(row["convergence_controller_errors"])
+        for row in rows
+        if isinstance(row.get("convergence_controller_errors"), list)
+    ]
 
     return {
         "schema_version": 1,
@@ -972,6 +1037,39 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "total_duplicate_source_filtered_count": duplicate_total,
             "total_recent_source_filtered_count": recent_total,
         },
+        "p2_convergence_controller": {
+            "total_convergence_trigger_count": convergence_total,
+            "mean_convergence_trigger_count": convergence_mean,
+            "soft_convergence_instance_count": soft_triggered,
+            "soft_convergence_instance_rate": _rate(
+                soft_triggered, len(controller_rows)
+            )
+            if soft_triggered is not None
+            else None,
+            "hard_convergence_instance_count": hard_triggered,
+            "hard_convergence_instance_rate": _rate(
+                hard_triggered, len(controller_rows)
+            )
+            if hard_triggered is not None
+            else None,
+            "mean_first_convergence_step": _mean(values("first_convergence_step")),
+            "median_first_convergence_step": _median(values("first_convergence_step")),
+            "mean_hard_convergence_step": _mean(values("hard_convergence_step")),
+            "median_hard_convergence_step": _median(values("hard_convergence_step")),
+            "mean_steps_since_last_change_peak": _mean(
+                values("steps_since_last_change_peak")
+            ),
+            "max_steps_since_last_change_peak": _maximum(
+                values("steps_since_last_change_peak")
+            ),
+            "total_phase_transition_count": _sum(phase_transition_values),
+            "total_controller_error_count": _sum(controller_error_values),
+            "controller_error_instance_count": sum(
+                value > 0 for value in controller_error_values
+            )
+            if controller_error_values
+            else None,
+        },
         "time": {
             "total_patchfox_wall_time": patchfox_total,
             "mean_patchfox_wall_time": patchfox_mean,
@@ -991,6 +1089,11 @@ def _write_per_instance_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> No
             serialized["changed_paths"] = json.dumps(
                 row.get("changed_paths") or [], ensure_ascii=False
             )
+            for field in ("phase_transitions", "convergence_controller_errors"):
+                value = row.get(field)
+                serialized[field] = (
+                    "" if value is None else json.dumps(value, ensure_ascii=False)
+                )
             writer.writerow(serialized)
 
 
@@ -1191,6 +1294,13 @@ def _mean(values: Sequence[float]) -> float | None:
 
 def _median(values: Sequence[float]) -> float | None:
     return float(statistics.median(values)) if values else None
+
+
+def _maximum(values: Sequence[float]) -> int | float | None:
+    if not values:
+        return None
+    result = max(values)
+    return int(result) if float(result).is_integer() else result
 
 
 def _rate(numerator: int, denominator: int) -> float | None:

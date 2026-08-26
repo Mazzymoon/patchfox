@@ -148,6 +148,7 @@ class Engine:
                     "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
                 },
             )
+            agent.mark_runtime_progress_prompt_injected(task_state, (prompt_metadata.get("runtime_progress") or {}).get("hint_id", ""))
             structured_memory = getattr(getattr(agent, "memory", None), "last_retrieval", None)
             if structured_memory is not None:
                 retrieval_metrics = dict(structured_memory.get("metrics", {}) or {})

@@ -94,8 +94,13 @@ class ContextReportBuilder:
         return {
             "active": bool(context.get("active", False)),
             "kind": str(context.get("kind", "")),
+            "hint_id": str(context.get("hint_id", "")),
             "remaining_steps": int(context.get("remaining_steps", 0) or 0),
             "phase_hint": str(context.get("phase_hint", "")),
+            "current_phase": str(context.get("current_phase", "")),
+            "convergence_trigger_count": int(
+                context.get("convergence_trigger_count", 0) or 0
+            ),
             "rendered_chars": progress.rendered_chars,
         }
 

@@ -1,3 +1,4 @@
+import csv
 import json
 import subprocess
 import threading
@@ -96,11 +97,34 @@ class FakeRunner:
         if self.detailed:
             task_state.update(
                 {
+                    "current_phase": "VERIFY",
+                    "convergence_trigger_count": 1,
+                    "first_convergence_step": 15,
+                    "hard_convergence_triggered": False,
+                    "hard_convergence_step": None,
+                    "phase_transitions": [
+                        {
+                            "from": "EXPLORE",
+                            "to": "CONVERGE",
+                            "step": 15,
+                            "reason": "soft_threshold_reached",
+                        },
+                        {
+                            "from": "CONVERGE",
+                            "to": "VERIFY",
+                            "step": 18,
+                            "reason": "workspace_changed",
+                        },
+                    ],
+                    "steps_since_last_change_peak": 17,
                     "first_change_step": 3,
                     "verification_after_change": True,
                     "max_consecutive_explore_steps": 2,
                     "repeated_source_read_count": 1,
                     "overlapping_read_count": 1,
+                    "patch_file_calls": 1,
+                    "write_file_calls": 0,
+                    "convergence_controller_errors": [],
                 }
             )
         report = {
@@ -426,11 +450,21 @@ def test_metrics_aggregate_per_instance_evidence_and_missing_values(tmp_path):
     (second_evidence / "trace.jsonl").unlink()
     task = json.loads((second_evidence / "task_state.json").read_text())
     for field in (
+        "current_phase",
+        "convergence_trigger_count",
+        "first_convergence_step",
+        "hard_convergence_triggered",
+        "hard_convergence_step",
+        "phase_transitions",
+        "steps_since_last_change_peak",
         "first_change_step",
         "verification_after_change",
         "max_consecutive_explore_steps",
         "repeated_source_read_count",
         "overlapping_read_count",
+        "patch_file_calls",
+        "write_file_calls",
+        "convergence_controller_errors",
     ):
         task.pop(field)
     task["changed_paths"] = []
@@ -440,15 +474,28 @@ def test_metrics_aggregate_per_instance_evidence_and_missing_values(tmp_path):
     (second_evidence / "report.json").write_text(json.dumps(report), encoding="utf-8")
 
     summary, rows = generate_statistics(config, ids)
+    with (config.experiment_dir / "per_instance_results.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        csv_rows = list(csv.DictReader(handle))
 
     assert rows[0]["first_change_step"] == 3
     assert rows[1]["first_change_step"] is None
     assert rows[1]["read_file_calls"] is None
+    assert csv_rows[0]["current_phase"] == "VERIFY"
+    assert csv_rows[0]["first_convergence_step"] == "15"
+    assert json.loads(csv_rows[0]["phase_transitions"])[0]["to"] == "CONVERGE"
     assert summary["tokens"]["total_input_tokens"] == 200
     assert summary["agent_behavior"]["mean_first_change_step"] == 3
     assert summary["agent_behavior"]["median_first_change_step"] == 3
     assert (
         summary["p1_memory_convergence"]["total_duplicate_source_filtered_count"] == 2
+    )
+    assert summary["p2_convergence_controller"]["total_convergence_trigger_count"] == 1
+    assert summary["p2_convergence_controller"]["soft_convergence_instance_rate"] == 1.0
+    assert summary["p2_convergence_controller"]["hard_convergence_instance_rate"] == 0.0
+    assert (
+        summary["p2_convergence_controller"]["max_steps_since_last_change_peak"] == 17
     )
 
 
@@ -479,6 +526,12 @@ def test_all_missing_metrics_stay_unavailable(tmp_path):
     assert summary["tokens"]["mean_input_tokens"] is None
     assert summary["tokens"]["median_input_tokens"] is None
     assert summary["p1_memory_convergence"]["total_repeated_source_read_count"] is None
+    assert (
+        summary["p2_convergence_controller"]["total_convergence_trigger_count"] is None
+    )
+    assert (
+        summary["p2_convergence_controller"]["soft_convergence_instance_rate"] is None
+    )
 
 
 def test_official_stdout_is_only_a_fallback(tmp_path):
@@ -498,7 +551,14 @@ def test_official_stdout_is_only_a_fallback(tmp_path):
 def test_config_conflict_rejects_resume(tmp_path):
     config = _config(tmp_path, num_instances=1)
     selection, _ = prepare_selection(config, catalog=_catalog(1))
-    prepare_experiment_config(config, selection)
+    stored = prepare_experiment_config(config, selection)
+
+    assert stored["convergence_controller"] == {
+        "enabled": True,
+        "soft_threshold": 15,
+        "hard_threshold": 25,
+        "phases": ["EXPLORE", "CONVERGE", "MODIFY", "VERIFY"],
+    }
 
     with pytest.raises(ValueError, match="model"):
         prepare_experiment_config(

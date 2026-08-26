@@ -25,7 +25,7 @@ def execute_tool_payload(engine, task_state, user_message, payload):
 
     tool_result = agent.run_tool(name, args)
     tool_metadata = dict(agent._last_tool_result_metadata or {})
-    agent.record_runtime_progress_after_tool(
+    convergence_snapshot = agent.record_runtime_progress_after_tool(
         task_state, name, args, tool_metadata
     )
     tool_duration_ms = int((time.monotonic() - tool_started_at) * 1000)
@@ -39,6 +39,7 @@ def execute_tool_payload(engine, task_state, user_message, payload):
             "workspace_changed": bool(tool_metadata.get("workspace_changed", False)),
             "affected_paths": list(tool_metadata.get("affected_paths", [])),
             "duration_ms": tool_duration_ms,
+            "convergence_controller": convergence_snapshot,
         },
     )
     history_item = {
@@ -79,6 +80,7 @@ def execute_tool_payload(engine, task_state, user_message, payload):
             "result": clip(tool_result, 500),
             "duration_ms": tool_duration_ms,
             **tool_metadata,
+            "convergence_controller": convergence_snapshot,
         },
     )
     checkpoint = agent.create_checkpoint(

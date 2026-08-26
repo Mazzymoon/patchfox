@@ -111,8 +111,11 @@ def test_context_report_builder_matches_existing_metadata_contract():
         "runtime_progress": {
             "active": False,
             "kind": "",
+            "hint_id": "",
             "remaining_steps": 0,
             "phase_hint": "",
+            "current_phase": "",
+            "convergence_trigger_count": 0,
             "rendered_chars": 0,
         },
         "history": {

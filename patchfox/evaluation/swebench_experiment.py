@@ -55,6 +55,9 @@ CSV_FIELDS = (
     "model_patch_bytes",
     "changed_paths",
     "stop_reason",
+    "model_error_code",
+    "model_error_http_status",
+    "model_error_retryable",
     "current_phase",
     "convergence_trigger_count",
     "first_convergence_step",
@@ -375,6 +378,7 @@ def initialize_progress(
             status = "pending"
         row.setdefault("attempts", 0)
         row["status"] = status
+        row.setdefault("rerunnable", status == "failed")
         instances[instance_id] = row
     payload = {
         "schema_version": 1,
@@ -404,6 +408,24 @@ def run_generation(
         progress["updated_at"] = utc_now()
         _atomic_write_json(progress_path, progress)
 
+    reconciled = False
+    for instance_id in selected_ids:
+        diagnostics = _generation_artifact_diagnostics(
+            config.experiment_dir / "generation" / instance_id
+        )
+        if diagnostics["stop_reason"] != "model_error":
+            continue
+        progress["instances"][instance_id].update(
+            {
+                "status": "failed",
+                "rerunnable": True,
+                **diagnostics,
+            }
+        )
+        reconciled = True
+    if reconciled:
+        persist()
+
     scheduled: list[str] = []
     for instance_id in selected_ids:
         row = progress["instances"][instance_id]
@@ -432,6 +454,11 @@ def run_generation(
                     "started_at": utc_now(),
                     "completed_at": None,
                     "error": None,
+                    "rerunnable": False,
+                    "stop_reason": None,
+                    "model_error_code": None,
+                    "model_error_http_status": None,
+                    "model_error_retryable": None,
                 }
             )
             persist()
@@ -464,17 +491,30 @@ def run_generation(
                 dataset_loader=lambda _dataset, _split: catalog.rows,
             )
             _materialize_evidence(result)
+            diagnostics = _generation_artifact_diagnostics(result.artifact_dir)
             completed = (
                 result.returncode == 0
                 and str(result.metadata.get("status")) == "completed"
+                and diagnostics["stop_reason"] != "model_error"
             )
             status = "completed" if completed else "failed"
             error = result.metadata.get("error") if not completed else None
+            if diagnostics["stop_reason"] == "model_error" and not error:
+                error = {
+                    "type": "ModelError",
+                    "message": "PatchFox generation stopped with model_error",
+                }
             returncode = int(result.returncode)
         except Exception as exc:  # noqa: BLE001 - one instance must not stop the batch.
             status = "failed"
             returncode = 1
             error = {"type": type(exc).__name__, "message": str(exc)}
+            diagnostics = {
+                "stop_reason": None,
+                "model_error_code": None,
+                "model_error_http_status": None,
+                "model_error_retryable": None,
+            }
             _write_generation_failure(config, instance_id, error)
 
         with lock:
@@ -485,6 +525,8 @@ def run_generation(
                     "completed_at": utc_now(),
                     "returncode": returncode,
                     "error": error,
+                    "rerunnable": status == "failed",
+                    **diagnostics,
                 }
             )
             persist()
@@ -512,12 +554,52 @@ def _valid_completed_artifact(experiment_dir: Path, instance_id: str) -> bool:
     artifact_dir = Path(experiment_dir) / "generation" / instance_id
     metadata = _read_json_if_exists(artifact_dir / "metadata.json")
     prediction = _read_json_if_exists(artifact_dir / "prediction.json")
+    diagnostics = _generation_artifact_diagnostics(artifact_dir)
     return bool(
         metadata.get("status") == "completed"
+        and diagnostics["stop_reason"] != "model_error"
         and prediction.get("instance_id") == instance_id
         and isinstance(prediction.get("model_patch"), str)
         and isinstance(prediction.get("model_name_or_path"), str)
     )
+
+
+def _generation_artifact_diagnostics(artifact_dir: Path) -> dict[str, Any]:
+    artifact_dir = Path(artifact_dir)
+    metadata = _read_json_if_exists(artifact_dir / "metadata.json")
+    report = _read_json_if_exists(artifact_dir / "evidence" / "report.json")
+    trace = _read_jsonl(artifact_dir / "evidence" / "trace.jsonl")
+    evidence = dict(metadata.get("evidence") or {})
+    task_state = dict(report.get("task_state") or {})
+    stop_reason = (
+        report.get("stop_reason")
+        or task_state.get("stop_reason")
+        or evidence.get("stop_reason")
+    )
+
+    provider_error = dict(
+        (report.get("prompt_metadata") or {}).get("provider_error") or {}
+    )
+    if not provider_error:
+        for event in reversed(trace):
+            if event.get("event") != "model_error":
+                continue
+            provider_error = dict(event.get("error") or {})
+            if not provider_error:
+                provider_error = dict(
+                    (event.get("completion_metadata") or {}).get("provider_error")
+                    or {}
+                )
+            break
+
+    return {
+        "stop_reason": str(stop_reason) if stop_reason else None,
+        "model_error_code": provider_error.get("code"),
+        "model_error_http_status": _number_or_none(
+            provider_error.get("http_status")
+        ),
+        "model_error_retryable": _bool_or_none(provider_error.get("retryable")),
+    }
 
 
 def _write_generation_failure(
@@ -821,6 +903,8 @@ def _per_instance_row(
         event for event in trace if event.get("event") == "memory.retrieval"
     ]
     official = dict(official or {})
+    generation_diagnostics = _generation_artifact_diagnostics(artifact_dir)
+    stop_reason = generation_diagnostics["stop_reason"]
 
     def task_metric(name: str) -> Any:
         if name in task_state:
@@ -839,13 +923,15 @@ def _per_instance_row(
         "base_commit": instance.get("base_commit"),
         "image_digest": metadata.get("image_digest"),
         "generation_status": (
-            "completed" if metadata.get("status") == "completed" else "failed"
+            "completed"
+            if metadata.get("status") == "completed" and stop_reason != "model_error"
+            else "failed"
         ),
         "official_status": official.get("official_status", "unavailable"),
         "resolved": official.get("resolved"),
         "model_patch_bytes": _number_or_none(patch_bytes),
         "changed_paths": list(changed_paths),
-        "stop_reason": report.get("stop_reason") or evidence.get("stop_reason"),
+        **generation_diagnostics,
         "current_phase": task_metric("current_phase"),
         "convergence_trigger_count": _number_or_none(
             task_metric("convergence_trigger_count")
@@ -958,6 +1044,16 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     resolved = sum(row.get("resolved") is True for row in rows)
     unresolved = sum(row.get("resolved") is False for row in rows)
     step_limit = sum(row.get("stop_reason") == "step_limit_reached" for row in rows)
+    model_error_rows = [row for row in rows if row.get("stop_reason") == "model_error"]
+    model_error_codes: dict[str, int] = {}
+    model_error_http_statuses: dict[str, int] = {}
+    for row in model_error_rows:
+        code = str(row.get("model_error_code") or "unknown")
+        model_error_codes[code] = model_error_codes.get(code, 0) + 1
+        http_status = row.get("model_error_http_status")
+        if http_status is not None:
+            key = str(http_status)
+            model_error_http_statuses[key] = model_error_http_statuses.get(key, 0) + 1
     final_answer = sum(bool(row.get("final_answer_present")) for row in rows)
     changed = [row for row in rows if row.get("changed_instance")]
     verified = sum(row.get("verification_after_change") is True for row in changed)
@@ -1034,6 +1130,7 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "total_instances": total,
             "generation_completed": completed,
             "generation_failed": failed,
+            "generation_model_error_count": len(model_error_rows),
             "non_empty_patch_count": non_empty,
             "empty_patch_count": empty,
             "empty_patch_rate": _rate(empty, total),
@@ -1045,6 +1142,22 @@ def _aggregate_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "step_limit_rate": _rate(step_limit, total),
             "final_answer_count": final_answer,
             "final_answer_rate": _rate(final_answer, total),
+        },
+        "generation_failures": {
+            "model_error_count": len(model_error_rows),
+            "model_error_code_counts": dict(sorted(model_error_codes.items())),
+            "model_error_http_status_counts": dict(
+                sorted(model_error_http_statuses.items())
+            ),
+            "model_error_retryable_count": sum(
+                row.get("model_error_retryable") is True for row in model_error_rows
+            ),
+            "model_error_non_retryable_count": sum(
+                row.get("model_error_retryable") is False for row in model_error_rows
+            ),
+            "model_error_retryability_unknown_count": sum(
+                row.get("model_error_retryable") is None for row in model_error_rows
+            ),
         },
         "tokens": {
             "total_input_tokens": input_total,

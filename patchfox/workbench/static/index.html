@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PatchFox · 任务工作台</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script defer src="/static/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/"
+        ><span class="logo">P<span>F</span></span
+        >PatchFox <span class="brand-divider">/</span
+        ><span class="brand-caption">Workbench</span></a
+      ><span class="local"><i></i>本地工作台</span>
+    </header>
+    <main>
+      <div class="page-heading">
+        <div>
+          <div class="eyebrow">BUILD · OBSERVE · VERIFY</div>
+          <h1>任务工作台<span class="title-dot">.</span></h1>
+          <p>提交修复任务，查看执行过程与验证结果。</p>
+        </div>
+        <span class="version">LOCAL / MVP 01</span>
+      </div>
+      <div id="mode-banner" class="banner" hidden></div>
+      <div id="connection-error" class="error" role="alert" hidden></div>
+      <div class="layout">
+        <aside>
+          <section class="card compose">
+            <div class="section-heading">
+              <h2>新建任务</h2>
+              <span class="tiny">01 / SUBMIT</span>
+            </div>
+            <form id="task-form">
+              <label for="repository">代码仓库</label
+              ><select id="repository" required></select>
+              <p id="repository-path" class="hint path"></p>
+              <label for="title">任务名称</label
+              ><input
+                id="title"
+                maxlength="120"
+                required
+                placeholder="例如：修复运费计算的边界条件"
+              />
+              <label for="prompt">需要完成什么？</label
+              ><textarea
+                id="prompt"
+                rows="5"
+                maxlength="20000"
+                required
+                placeholder="说明问题、期望行为，以及需要保留的约束。"
+              ></textarea>
+              <div class="form-row">
+                <label for="max-steps">工具步数上限</label
+                ><input
+                  id="max-steps"
+                  type="number"
+                  value="30"
+                  min="1"
+                  max="100"
+                  required
+                />
+              </div>
+              <div class="verification-command">
+                <span>独立验收命令</span><code id="test-command">未配置</code>
+              </div>
+              <p class="hint">
+                任务在独立副本中执行，不自动回写原仓库。提交前请保存并提交代码。
+              </p>
+              <div id="form-error" class="error" role="alert" hidden></div>
+              <button class="primary" id="submit-button" type="submit">
+                提交任务 <span>↗</span>
+              </button>
+            </form>
+          </section>
+          <section class="card queue">
+            <div class="section-heading">
+              <h2>最近任务 <span id="task-count" class="count">0</span></h2>
+              <span class="tiny">自动更新</span>
+            </div>
+            <div id="task-list"><p class="muted empty-list">还没有任务</p></div>
+          </section>
+        </aside>
+        <section class="card detail">
+          <div id="empty-state" class="empty-state">
+            <div class="empty-symbol">⌘</div>
+            <div class="eyebrow">YOUR NEXT FIX STARTS HERE</div>
+            <h2>从一个小问题开始</h2>
+            <p>提交任务后，在这里查看修改、<br />测试结果与完整执行过程。</p>
+            <div class="empty-steps">
+              <span>提交</span><b>→</b><span>执行</span><b>→</b
+              ><span>验证</span>
+            </div>
+          </div>
+          <div id="task-detail" hidden>
+            <div class="detail-heading">
+              <div>
+                <div class="eyebrow" id="task-id"></div>
+                <h2 id="detail-title"></h2>
+              </div>
+              <span id="task-status" class="badge"></span>
+            </div>
+            <div class="progress-track" aria-label="执行阶段">
+              <span data-phase="queued">排队</span
+              ><span data-phase="preparing">准备</span
+              ><span data-phase="baseline">基线测试</span
+              ><span data-phase="agent">Agent 执行</span
+              ><span data-phase="verification">独立验收</span
+              ><span data-phase="finished">结束</span>
+            </div>
+            <div class="metrics">
+              <div><span>工具执行</span><strong id="tool-steps">0</strong></div>
+              <div>
+                <span>修改文件</span><strong id="changed-count">0</strong>
+              </div>
+              <div>
+                <span>验收结果</span><strong id="test-status">未运行</strong>
+              </div>
+            </div>
+            <p id="task-error" class="error task-error" hidden></p>
+            <div class="tabs" role="tablist">
+              <button role="tab" data-tab="overview" aria-selected="true">
+                结果概览</button
+              ><button role="tab" data-tab="diff" aria-selected="false">
+                代码 Diff</button
+              ><button role="tab" data-tab="tests" aria-selected="false">
+                测试结果</button
+              ><button role="tab" data-tab="logs" aria-selected="false">
+                执行日志
+              </button>
+            </div>
+            <div class="tab-panel" id="panel-overview" role="tabpanel">
+              <h3>任务说明</h3>
+              <p id="detail-prompt" class="preserve"></p>
+              <h3>Agent 返回</h3>
+              <p id="final-answer" class="preserve muted"></p>
+              <h3>修改文件</h3>
+              <ul id="changed-files"></ul>
+              <dl class="metadata">
+                <dt>提交基线</dt>
+                <dd id="base-commit"></dd>
+                <dt>停止原因</dt>
+                <dd id="stop-reason"></dd>
+                <dt>最近工具</dt>
+                <dd id="last-tool"></dd>
+                <dt>任务副本</dt>
+                <dd id="workspace-path"></dd>
+                <dt>产物目录</dt>
+                <dd id="artifact-path"></dd>
+              </dl>
+            </div>
+            <div class="tab-panel" id="panel-diff" role="tabpanel" hidden>
+              <div class="panel-note">相对于提交基线的修改，包含新增文件。</div>
+              <pre id="diff-content">等待生成 Diff…</pre>
+            </div>
+            <div class="tab-panel" id="panel-tests" role="tabpanel" hidden>
+              <div class="panel-note">
+                由工作台执行配置的验收命令，记录真实退出码。通过仅代表这些检查通过。
+              </div>
+              <div class="test-heading">
+                <h3>修改前</h3>
+                <span id="before-status" class="badge"></span>
+              </div>
+              <pre id="before-content"></pre>
+              <div class="test-heading">
+                <h3>修改后</h3>
+                <span id="after-status" class="badge"></span>
+              </div>
+              <pre id="after-content"></pre>
+            </div>
+            <div class="tab-panel" id="panel-logs" role="tabpanel" hidden>
+              <div class="panel-note">
+                进程输出持续更新；详细工具事件保存在任务副本的 .patchfox
+                目录中。
+              </div>
+              <pre id="agent-content"></pre>
+              <details>
+                <summary>准备日志</summary>
+                <pre id="setup-content"></pre>
+              </details>
+            </div>
+          </div>
+        </section>
+      </div>
+      <footer>
+        <span>PatchFox · 每次任务独立留档</span
+        ><span>原仓库 → 任务副本 → Diff + 验收结果</span>
+      </footer>
+    </main>
+  </body>
+</html>

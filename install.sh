@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${PATCHFOX_REPO:-https://github.com/martin-los/patchfox.git}"
+REPO="${PATCHFOX_REPO:-https://github.com/Mazzymoon/patchfox.git}"
 INSTALL_DIR="${PATCHFOX_INSTALL_DIR:-$HOME/.patchfox-agent}"
 BRANCH="${PATCHFOX_BRANCH:-main}"
 

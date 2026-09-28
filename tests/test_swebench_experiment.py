@@ -63,9 +63,18 @@ def _config(tmp_path, *, num_instances=3, **overrides):
 
 
 class FakeRunner:
-    def __init__(self, *, failures=(), empty=(), interrupt_on=None, detailed=False):
+    def __init__(
+        self,
+        *,
+        failures=(),
+        empty=(),
+        stop_reasons=None,
+        interrupt_on=None,
+        detailed=False,
+    ):
         self.failures = set(failures)
         self.empty = set(empty)
+        self.stop_reasons = dict(stop_reasons or {})
         self.interrupt_on = interrupt_on
         self.detailed = detailed
         self.calls = []
@@ -88,9 +97,13 @@ class FakeRunner:
         evidence_dir = workspace / ".patchfox" / "runs" / "run-1"
         evidence_dir.mkdir(parents=True)
         patch = "" if config.instance_id in self.empty else "diff --git a/a b/a\n"
+        stop_reason = self.stop_reasons.get(
+            config.instance_id, "final_answer_returned"
+        )
+        model_error = stop_reason == "model_error"
         task_state = {
-            "status": "completed",
-            "stop_reason": "final_answer_returned",
+            "status": "failed" if model_error else "completed",
+            "stop_reason": stop_reason,
             "changed_paths": [] if not patch else ["a.py"],
             "final_answer": "Done",
         }
@@ -128,11 +141,20 @@ class FakeRunner:
                 }
             )
         report = {
-            "status": "completed",
-            "stop_reason": "final_answer_returned",
+            "status": "failed" if model_error else "completed",
+            "stop_reason": stop_reason,
             "final_answer": "Done",
             "tool_steps": 4,
             "task_state": task_state,
+            "prompt_metadata": {
+                "provider_error": {
+                    "code": "empty_response",
+                    "http_status": 200,
+                    "retryable": False,
+                }
+            }
+            if model_error
+            else {},
         }
         events = [
             {"event": "model_parsed"},
@@ -175,7 +197,7 @@ class FakeRunner:
             "adapter_wall_time_seconds": 12,
             "error": None,
             "evidence": {
-                "stop_reason": "final_answer_returned",
+                "stop_reason": stop_reason,
                 "changed_paths": task_state["changed_paths"],
                 "tool_steps": 4,
                 "usage": {
@@ -290,6 +312,111 @@ def test_failure_does_not_block_and_rerun_failed_runs_only_failure(tmp_path):
         config, ids, catalog=catalog, resume=True, rerun_failed=True, runner=retry
     )
     assert retry.calls == [ids[1]]
+
+
+def test_model_error_is_failed_and_rerunnable_even_when_adapter_completed(tmp_path):
+    catalog = _catalog(3)
+    config = _config(tmp_path)
+    selection, _ = prepare_selection(config, catalog=catalog)
+    ids = selection["selected_instance_ids"]
+    first = FakeRunner(stop_reasons={ids[1]: "model_error"})
+
+    progress = run_generation(
+        config, ids, catalog=catalog, resume=False, rerun_failed=False, runner=first
+    )
+
+    failed = progress["instances"][ids[1]]
+    assert failed["status"] == "failed"
+    assert failed["rerunnable"] is True
+    assert failed["stop_reason"] == "model_error"
+    assert failed["model_error_code"] == "empty_response"
+    assert failed["model_error_http_status"] == 200
+    assert failed["model_error_retryable"] is False
+
+    # Simulate P3-era progress that incorrectly called this artifact complete.
+    progress_path = config.experiment_dir / "progress.json"
+    persisted = json.loads(progress_path.read_text())
+    persisted["instances"][ids[1]]["status"] = "completed"
+    persisted["instances"][ids[1]]["rerunnable"] = False
+    progress_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    retry = FakeRunner()
+    run_generation(
+        config, ids, catalog=catalog, resume=True, rerun_failed=True, runner=retry
+    )
+    assert retry.calls == [ids[1]]
+
+
+def test_rerun_failed_skips_empty_patch_unresolved_and_step_limit(tmp_path):
+    catalog = _catalog(3)
+    config = _config(tmp_path)
+    selection, _ = prepare_selection(config, catalog=catalog)
+    ids = selection["selected_instance_ids"]
+    first = FakeRunner(
+        empty={ids[0]},
+        stop_reasons={ids[1]: "step_limit_reached"},
+    )
+    progress = run_generation(
+        config, ids, catalog=catalog, resume=False, rerun_failed=False, runner=first
+    )
+
+    # Official unresolved is an evaluation result and must not alter generation status.
+    official_dir = config.experiment_dir / "evaluation"
+    official_dir.mkdir(parents=True)
+    (official_dir / "official_results.json").write_text(
+        json.dumps(
+            {
+                "per_instance": {
+                    ids[2]: {"official_status": "unresolved", "resolved": False}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert all(progress["instances"][item]["status"] == "completed" for item in ids)
+
+    retry = FakeRunner()
+    run_generation(
+        config, ids, catalog=catalog, resume=True, rerun_failed=True, runner=retry
+    )
+    assert retry.calls == []
+
+
+def test_model_error_fields_are_in_csv_and_summary(tmp_path):
+    catalog = _catalog(1)
+    config = _config(tmp_path, num_instances=1)
+    selection, _ = prepare_selection(config, catalog=catalog)
+    ids = selection["selected_instance_ids"]
+    run_generation(
+        config,
+        ids,
+        catalog=catalog,
+        resume=False,
+        rerun_failed=False,
+        runner=FakeRunner(stop_reasons={ids[0]: "model_error"}),
+    )
+
+    summary, rows = generate_statistics(config, ids)
+    with (config.experiment_dir / "per_instance_results.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        csv_row = next(csv.DictReader(handle))
+
+    assert rows[0]["generation_status"] == "failed"
+    assert rows[0]["stop_reason"] == "model_error"
+    assert csv_row["model_error_code"] == "empty_response"
+    assert csv_row["model_error_http_status"] == "200"
+    assert csv_row["model_error_retryable"] == "False"
+    assert summary["results"]["generation_failed"] == 1
+    assert summary["results"]["official_unresolved"] == 0
+    assert summary["generation_failures"] == {
+        "model_error_count": 1,
+        "model_error_code_counts": {"empty_response": 1},
+        "model_error_http_status_counts": {"200": 1},
+        "model_error_retryable_count": 0,
+        "model_error_non_retryable_count": 1,
+        "model_error_retryability_unknown_count": 0,
+    }
 
 
 def test_empty_and_failed_predictions_are_in_stable_selected_order(tmp_path):

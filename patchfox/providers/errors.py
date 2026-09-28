@@ -18,6 +18,7 @@ class ProviderError(RuntimeError):
         retry_count=0,
         body_excerpt="",
         cause_type="",
+        response_diagnostics=None,
     ):
         super().__init__(message)
         self.provider = str(provider or "")
@@ -30,6 +31,7 @@ class ProviderError(RuntimeError):
         self.retry_count = int(retry_count or 0)
         self.body_excerpt = _clip(body_excerpt, 500)
         self.cause_type = str(cause_type or "")
+        self.response_diagnostics = dict(response_diagnostics or {})
 
     def to_metadata(self):
         payload = {
@@ -53,6 +55,7 @@ class ProviderError(RuntimeError):
             error["body_excerpt"] = self.body_excerpt
         if self.cause_type:
             error["cause_type"] = self.cause_type
+        error.update(self.response_diagnostics)
         return payload
 
 

@@ -8,9 +8,9 @@ runtime 只关心一件事：给我一个 prompt，我拿回一段文本。
 import json
 import socket
 import time
-from http.client import RemoteDisconnected
 import urllib.error
 import urllib.request
+from http.client import RemoteDisconnected
 
 from ..core.content_blocks import ensure_model_input
 from ..version import __version__
@@ -300,7 +300,16 @@ def _retry_after_seconds(headers):
         return None
 
 
-def _provider_failure(provider, model, base_url, code, message, request_metadata=None, cause=None):
+def _provider_failure(
+    provider,
+    model,
+    base_url,
+    code,
+    message,
+    request_metadata=None,
+    cause=None,
+    response_diagnostics=None,
+):
     request_metadata = request_metadata or {}
     error = ProviderError(
         message,
@@ -312,6 +321,7 @@ def _provider_failure(provider, model, base_url, code, message, request_metadata
         attempts=request_metadata.get("provider_attempts", 1),
         retry_count=request_metadata.get("provider_retry_count", 0),
         cause_type=type(cause).__name__ if cause else "",
+        response_diagnostics=response_diagnostics,
     )
     return error
 
@@ -470,12 +480,58 @@ class OpenAICompatibleModelClient:
 
 
 def _extract_anthropic_text(data):
+    if not isinstance(data, dict):
+        return ""
     for item in data.get("content", []):
         if isinstance(item, dict) and item.get("type") == "text":
             text = item.get("text")
             if isinstance(text, str) and text:
                 return text
     return ""
+
+
+def _anthropic_response_diagnostics(data):
+    """Return bounded structural metadata without retaining response text."""
+
+    diagnostics = {
+        "response_type": type(data).__name__,
+        "stop_reason": None,
+        "content_count": None,
+        "content_block_types": [],
+        "text_block_count": 0,
+        "text_lengths": [],
+    }
+    if not isinstance(data, dict):
+        return diagnostics
+
+    response_type = data.get("type")
+    if isinstance(response_type, str) and response_type:
+        diagnostics["response_type"] = response_type[:100]
+    stop_reason = data.get("stop_reason")
+    if isinstance(stop_reason, (str, int, float, bool)) or stop_reason is None:
+        diagnostics["stop_reason"] = stop_reason
+
+    content = data.get("content")
+    if isinstance(content, list):
+        diagnostics["content_count"] = len(content)
+        for block in content[:100]:
+            if isinstance(block, dict):
+                block_type = block.get("type")
+                diagnostics["content_block_types"].append(
+                    str(block_type)[:100] if block_type is not None else "missing"
+                )
+                if block_type == "text":
+                    diagnostics["text_block_count"] += 1
+                    text = block.get("text")
+                    diagnostics["text_lengths"].append(
+                        len(text) if isinstance(text, str) else None
+                    )
+            else:
+                diagnostics["content_block_types"].append(type(block).__name__)
+
+    if isinstance(data.get("usage"), dict):
+        diagnostics["usage"] = _extract_usage_cache_details(data)
+    return diagnostics
 
 
 class AnthropicCompatibleModelClient:
@@ -546,7 +602,7 @@ class AnthropicCompatibleModelClient:
             )
             self.last_completion_metadata = error.to_metadata()
             raise error from exc
-        if data.get("error"):
+        if isinstance(data, dict) and data.get("error"):
             error = _provider_failure(
                 "anthropic",
                 self.model,
@@ -572,6 +628,7 @@ class AnthropicCompatibleModelClient:
             "empty_response",
             "Anthropic-compatible error: could not extract text from response",
             request_metadata,
+            response_diagnostics=_anthropic_response_diagnostics(data),
         )
         self.last_completion_metadata = error.to_metadata()
         raise error

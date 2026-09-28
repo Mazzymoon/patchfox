@@ -117,11 +117,11 @@ class Engine:
 
         tool_steps = 0
         attempts = 0
+        completed_model_calls = 0
         provider_retries = {}
         # 不放大 attempts，避免出现"看不见的隐形重试"——失败必须被用户察觉。
         max_attempts = agent.max_steps + 2
-
-        while tool_steps < agent.max_steps and attempts < max_attempts:
+        while tool_steps < agent.max_steps and completed_model_calls < max_attempts:
             if agent.abort_requested:
                 yield from finish_stopped_run(
                     self,
@@ -313,6 +313,8 @@ class Engine:
                     run_started_at,
                 )
                 return
+            completed_model_calls += 1
+            provider_retries.clear()
             raw = result.text
             completion_metadata = dict(
                 result.metadata
@@ -446,7 +448,7 @@ class Engine:
             )
             return
 
-        if attempts >= max_attempts and tool_steps < agent.max_steps:
+        if completed_model_calls >= max_attempts and tool_steps < agent.max_steps:
             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
             task_state.stop_retry_limit(final)
         else:

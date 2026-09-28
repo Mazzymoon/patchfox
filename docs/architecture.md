@@ -55,10 +55,17 @@ CLI / REPL / Textual TUI
 
 核心继续遵守以下边界：
 
-- 不增加 Web server、浏览器 UI 或独立数据库；
+- 默认 CLI/Runtime 不依赖 Web server、浏览器 UI 或独立数据库；
 - 不把默认工具拆成需要额外进程的服务；
 - 不要求 Node.js、容器、WSL 或远程 sandbox 才能启动；
 - 可选功能必须能关闭，关闭后不影响基本的读、改、测闭环；
 - 新抽象必须解决已经存在的跨平台或测试问题，不为假设中的扩展预留复杂框架。
 
 当前重构重点只有三项：统一 PatchFox 品牌与本地状态协议、保证 Windows/Linux/macOS 的命令执行一致性、用回归测试守住文件安全和运行证据。
+
+## 可选任务工作台
+
+`patchfox/workbench/` 提供独立的 FastAPI 入口，通过 SQLite 管理任务队列，
+使用独立 Git 副本和子进程调用既有 CLI。它不改变核心 Agent Loop、Memory
+或 `.patchfox` 证据格式，依赖通过 `pip install -e ".[workbench]"` 单独安装。
+设计、数据归属和验收流程见 [workbench.md](workbench.md)。

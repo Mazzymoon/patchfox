@@ -1,25 +1,26 @@
-import os
 import io
 import json
+import os
 import subprocess
 import sys
 import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 import patchfox as patchfox_pkg
 import patchfox.providers as providers_pkg
-import pytest
-from patchfox.testing import ScriptedModelClient
 from patchfox import (
     AnthropicCompatibleModelClient,
-    PatchFox,
     OpenAICompatibleModelClient,
+    PatchFox,
     SessionStore,
     WorkspaceContext,
     build_welcome,
 )
 from patchfox.providers import ProviderError
+from patchfox.testing import ScriptedModelClient
 
 
 def build_workspace(tmp_path):
@@ -742,6 +743,80 @@ def test_anthropic_compatible_client_records_usage_metadata():
     assert client.last_completion_metadata["output_tokens"] == 56
     assert client.last_completion_metadata["cached_tokens"] == 100
     assert client.last_completion_metadata["cache_hit"] is True
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (
+            {"type": "message", "stop_reason": "end_turn", "content": []},
+            {
+                "response_type": "message",
+                "stop_reason": "end_turn",
+                "content_count": 0,
+                "content_block_types": [],
+                "text_block_count": 0,
+                "text_lengths": [],
+            },
+        ),
+        (
+            {"type": "message", "content": [{"type": "text", "text": ""}]},
+            {
+                "response_type": "message",
+                "stop_reason": None,
+                "content_count": 1,
+                "content_block_types": ["text"],
+                "text_block_count": 1,
+                "text_lengths": [0],
+            },
+        ),
+        (
+            {"type": "message", "content": [{"type": "thinking", "thinking": "secret"}]},
+            {
+                "response_type": "message",
+                "stop_reason": None,
+                "content_count": 1,
+                "content_block_types": ["thinking"],
+                "text_block_count": 0,
+                "text_lengths": [],
+            },
+        ),
+    ],
+)
+def test_anthropic_empty_response_records_safe_structure_diagnostics(
+    response, expected
+):
+    class FakeResponse:
+        def __init__(self):
+            self.headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(response).encode("utf-8")
+
+    client = AnthropicCompatibleModelClient(
+        model="deepseek-v4-flash",
+        base_url="https://example.com/anthropic/v1",
+        api_key="sk-test",
+        temperature=0.2,
+        timeout=30,
+    )
+
+    with patch("urllib.request.urlopen", return_value=FakeResponse()), pytest.raises(
+        ProviderError
+    ) as caught:
+        client.complete("hello", 42)
+
+    provider_error = caught.value.to_metadata()["provider_error"]
+    assert provider_error["code"] == "empty_response"
+    for key, value in expected.items():
+        assert provider_error[key] == value
+    assert "secret" not in json.dumps(provider_error)
 
 
 def test_build_agent_uses_openai_provider_and_model_override(tmp_path):

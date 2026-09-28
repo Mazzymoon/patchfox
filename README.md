@@ -47,16 +47,32 @@ TUI 直接连接同一个 runtime。输入框、工具结果、状态栏、slash
 一键安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/martin-los/patchfox/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Mazzymoon/patchfox/main/install.sh | bash
 ```
 
 源码安装：
 
 ```bash
-git clone https://github.com/martin-los/patchfox.git
+git clone https://github.com/Mazzymoon/patchfox.git
 cd patchfox
-pip install -e .
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
 ```
+
+Windows PowerShell：
+
+```powershell
+git clone https://github.com/Mazzymoon/patchfox.git
+Set-Location patchfox
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+```
+
+安装完成后，在需要阅读或修改的代码仓库目录中执行 `patchfox config init` 配置自己的
+Provider 和 API Key，再运行 `patchfox` 或 `patchfox-tui`。API Key 保存在用户目录，
+不会随项目代码提交到 GitHub。
 
 开发 checkout 里也可以直接跑：
 
@@ -245,6 +261,23 @@ patchfox/
 └── evaluation/            # run evidence、metrics、evaluation helpers
 ```
 
+## 本地任务工作台（可选）
+
+通过浏览器提交任务、查看进度、代码 Diff 和修改前后的测试结果。工作台使用
+FastAPI + SQLite 管理任务，每个任务在独立 Git 副本中调用现有 Runtime。
+默认 CLI/TUI 不依赖工作台。
+
+```bash
+pip install -e ".[workbench]"
+python -m patchfox.workbench --demo
+```
+
+打开 `http://127.0.0.1:8765`。`--demo` 使用脚本模型和真实 Runtime 完成一次离线
+修复验收，不调用模型 API。实际仓库使用 `--repo /path/to/repo`，通过
+`--test-command "python -m pytest -q"` 配置独立验收。
+
+数据与文件的划分、执行边界和最小验收步骤见 [工作台说明](docs/workbench.md)。
+
 ## 测试
 
 ```bash
@@ -254,4 +287,3 @@ pytest tests/ -q
 # 真实 provider 烟测需要 key
 PATCHFOX_LIVE_SMOKE=1 pytest tests/test_release_smoke.py -q
 ```
-

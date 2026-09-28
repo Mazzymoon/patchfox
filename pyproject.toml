@@ -15,6 +15,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+workbench = [
+  "fastapi>=0.115.0,<1",
+  "uvicorn>=0.30.0,<1",
+]
 swebench = [
   "datasets>=2.19.0",
 ]
@@ -22,6 +26,7 @@ swebench = [
 [project.scripts]
 patchfox = "patchfox.cli:main"
 patchfox-tui = "patchfox.tui.main:main"
+patchfox-workbench = "patchfox.workbench.__main__:main"
 
 [dependency-groups]
 dev = [
@@ -32,6 +37,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["patchfox*"]
+
+[tool.setuptools.package-data]
+"patchfox.workbench" = ["static/*.html", "static/*.css", "static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -231,6 +231,71 @@ def test_empty_response_provider_error_is_retried_once_before_failing(tmp_path):
     ]
 
 
+def test_empty_response_retry_budget_resets_after_success(tmp_path):
+    def empty_response():
+        return ProviderError(
+            "empty provider response",
+            provider="anthropic",
+            model="deepseek-v4-flash",
+            code="empty_response",
+            retryable=False,
+        )
+
+    agent = build_agent(
+        tmp_path,
+        [
+            empty_response(),
+            '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":1}}</tool>',
+            empty_response(),
+            "<final>Recovered twice.</final>",
+        ],
+    )
+
+    events = list(agent.engine.run_turn("recover across separate failure streaks"))
+
+    assert events[-2]["content"] == "Recovered twice."
+    assert agent.current_task_state.tool_steps == 1
+    trace = read_jsonl(agent.current_run_dir / "trace.jsonl")
+    retries = [event for event in trace if event["event"] == "model_retry_scheduled"]
+    assert [event["retry_count"] for event in retries] == [1, 1]
+
+
+def test_two_consecutive_empty_responses_stop_after_one_retry(tmp_path):
+    errors = [
+        ProviderError("empty", code="empty_response"),
+        ProviderError("empty again", code="empty_response"),
+    ]
+    agent = build_agent(tmp_path, errors)
+
+    events = list(agent.engine.run_turn("fail after the bounded retry"))
+
+    assert events[-1]["stop_reason"] == "model_error"
+    trace = read_jsonl(agent.current_run_dir / "trace.jsonl")
+    assert sum(event["event"] == "model_retry_scheduled" for event in trace) == 1
+
+
+def test_reset_retry_budget_still_bounds_the_next_failure_streak(tmp_path):
+    def empty_response():
+        return ProviderError("empty", code="empty_response")
+
+    agent = build_agent(
+        tmp_path,
+        [
+            empty_response(),
+            '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":1}}</tool>',
+            empty_response(),
+            empty_response(),
+        ],
+    )
+
+    events = list(agent.engine.run_turn("reset, then hit another bounded streak"))
+
+    assert events[-1]["stop_reason"] == "model_error"
+    trace = read_jsonl(agent.current_run_dir / "trace.jsonl")
+    retries = [event for event in trace if event["event"] == "model_retry_scheduled"]
+    assert [event["retry_count"] for event in retries] == [1, 1]
+
+
 def test_parse_retry_transition_preserves_stream_order(tmp_path):
     agent = build_agent(
         tmp_path,
